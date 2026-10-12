@@ -14,9 +14,14 @@ export interface ToolRunResult {
   isError: boolean;
 }
 
+export interface ToolRunOptions {
+  /** Aborting it cancels the tool's HTTP request. */
+  signal?: AbortSignal;
+}
+
 export interface CoordinatorTools {
   definitions: Anthropic.Beta.BetaTool[];
-  run(name: string, input: unknown): Promise<ToolRunResult>;
+  run(name: string, input: unknown, options?: ToolRunOptions): Promise<ToolRunResult>;
 }
 
 export interface CoordinatorToolsOptions {
@@ -32,7 +37,7 @@ interface ToolSpec {
   description: string;
   params: { name: string; description: string; required: boolean }[];
   /** Absent for interaction tools, which the agent executes. */
-  handler?: (input: StringParams) => Promise<string>;
+  handler?: (input: StringParams, signal?: AbortSignal) => Promise<string>;
 }
 
 const MAX_OUTPUT_CHARS = 5000;
@@ -41,9 +46,10 @@ export function createCoordinatorTools(options: CoordinatorToolsOptions): Coordi
   const doFetch = options.fetch ?? globalThis.fetch;
   const base = `http://localhost:${options.serverPort}`;
 
-  async function request(path: string, init?: RequestInit): Promise<string> {
+  async function request(path: string, init?: RequestInit, signal?: AbortSignal): Promise<string> {
     const response = await doFetch(`${base}${path}`, {
       ...init,
+      signal,
       headers: { "Content-Type": "application/json", ...(init?.headers || {}) },
     });
     const body: any = await response.json().catch(() => ({ error: `HTTP ${response.status}` }));
@@ -59,14 +65,14 @@ export function createCoordinatorTools(options: CoordinatorToolsOptions): Coordi
       description:
         "List every OpenUI coding-agent session with its status, agent type, working directory and branch. Call this first whenever a directive mentions sessions, agents or 'everyone', and before any send_directive, to get exact session IDs.",
       params: [],
-      handler: () => request("/api/sessions"),
+      handler: (_input, signal) => request("/api/sessions", undefined, signal),
     },
     {
       name: "get_session_status",
       description:
         "Get the detailed status of one session, including its current tool and hook event. Call it when you need to know whether an exact session is idle, working or waiting for input.",
       params: [{ name: "sessionId", description: "Exact session ID from list_active_sessions", required: true }],
-      handler: (input) => request(`/api/sessions/${encodeURIComponent(input.sessionId)}/status`),
+      handler: (input, signal) => request(`/api/sessions/${encodeURIComponent(input.sessionId)}/status`, undefined, signal),
     },
     {
       name: "read_session_output",
@@ -74,6 +80,10 @@ export function createCoordinatorTools(options: CoordinatorToolsOptions): Coordi
         "Read the last part of a session's raw terminal output. Use it only when get_session_activity is not enough, for example to see an agent's latest reply verbatim.",
       params: [{ name: "sessionId", description: "Exact session ID", required: true }],
       handler: async (input) => {
+        // The id names a file under the buffers dir; never let it walk out of it.
+        if (/[\/\\]|\.\./.test(input.sessionId)) {
+          throw new Error("Invalid input for read_session_output: sessionId must be a plain session ID");
+        }
         const bufferFile = join(options.launchCwd, ".openui-desktop", "buffers", `${input.sessionId}.txt`);
         if (!existsSync(bufferFile)) return "(no output buffer found for this session)";
         const content = readFileSync(bufferFile, "utf-8");
@@ -88,14 +98,14 @@ export function createCoordinatorTools(options: CoordinatorToolsOptions): Coordi
       description:
         "Read the recent structured command activity of one exact session. Prefer this over read_session_output when working out what an agent has been doing.",
       params: [{ name: "sessionId", description: "Exact session ID from list_active_sessions", required: true }],
-      handler: (input) => request(`/api/sessions/${encodeURIComponent(input.sessionId)}/blocks?limit=12`),
+      handler: (input, signal) => request(`/api/sessions/${encodeURIComponent(input.sessionId)}/blocks?limit=12`, undefined, signal),
     },
     {
       name: "get_coordination_state",
       description:
         "Get the authoritative coordinator snapshot: session readiness, active decisions, directive queues and recent coordination events. Call it before recording a decision or sending a directive.",
       params: [],
-      handler: () => request("/api/coordinator/snapshot"),
+      handler: (_input, signal) => request("/api/coordinator/snapshot", undefined, signal),
     },
     {
       name: "record_decision",
@@ -108,7 +118,7 @@ export function createCoordinatorTools(options: CoordinatorToolsOptions): Coordi
         { name: "sessionIds", description: "Optional comma-separated exact session IDs; omit for workspace scope", required: false },
         { name: "supersedes", description: "Exact active decision ID this replaces", required: false },
       ],
-      handler: async (input) => {
+      handler: async (input, signal) => {
         const sessionIds = (input.sessionIds || "").split(",").map((item) => item.trim()).filter(Boolean);
         try {
           return await request("/api/coordinator/decisions", {
@@ -121,7 +131,7 @@ export function createCoordinatorTools(options: CoordinatorToolsOptions): Coordi
               supersedes: input.supersedes || undefined,
               author: "coordinator",
             }),
-          });
+          }, signal);
         } catch (e: any) {
           throw new Error(`Decision was not recorded: ${e.message}`);
         }
@@ -137,7 +147,7 @@ export function createCoordinatorTools(options: CoordinatorToolsOptions): Coordi
         { name: "decisionId", description: "Optional active decision ID supporting the directive", required: false },
         { name: "clientRequestId", description: "Optional stable idempotency key for retry safety", required: false },
       ],
-      handler: async (input) => {
+      handler: async (input, signal) => {
         try {
           return await request("/api/coordinator/directives", {
             method: "POST",
@@ -148,7 +158,7 @@ export function createCoordinatorTools(options: CoordinatorToolsOptions): Coordi
               clientRequestId: input.clientRequestId || undefined,
               author: "coordinator",
             }),
-          });
+          }, signal);
         } catch (e: any) {
           throw new Error(`Directive was not queued: ${e.message}`);
         }
@@ -159,12 +169,12 @@ export function createCoordinatorTools(options: CoordinatorToolsOptions): Coordi
       description:
         "Acknowledge a submitted directive after its target agent has confirmed incorporating it. Never call it just because the text was submitted to the terminal.",
       params: [{ name: "directiveId", description: "Exact directive ID", required: true }],
-      handler: async (input) => {
+      handler: async (input, signal) => {
         try {
           return await request(`/api/coordinator/directives/${encodeURIComponent(input.directiveId)}/acknowledge`, {
             method: "POST",
             body: "{}",
-          });
+          }, signal);
         } catch (e: any) {
           throw new Error(`Directive was not acknowledged: ${e.message}`);
         }
@@ -222,7 +232,7 @@ export function createCoordinatorTools(options: CoordinatorToolsOptions): Coordi
     return null;
   }
 
-  async function run(name: string, input: unknown): Promise<ToolRunResult> {
+  async function run(name: string, input: unknown, runOptions?: ToolRunOptions): Promise<ToolRunResult> {
     const spec = byName.get(name);
     if (!spec) return { content: `Unknown tool: ${name}`, isError: true };
     const problem = validate(spec, input);
@@ -231,7 +241,7 @@ export function createCoordinatorTools(options: CoordinatorToolsOptions): Coordi
       return { content: `${name} must be answered by the user; the agent handles it`, isError: true };
     }
     try {
-      return { content: await spec.handler(input as StringParams), isError: false };
+      return { content: await spec.handler(input as StringParams, runOptions?.signal), isError: false };
     } catch (e: any) {
       return { content: e?.message || String(e), isError: true };
     }

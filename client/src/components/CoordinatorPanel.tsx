@@ -418,7 +418,7 @@ export function CoordinatorPanel() {
                         <>
                           <p className="text-sm text-zinc-400 mb-1">Coordinator needs an API key</p>
                           <p className="text-xs text-zinc-600">
-                            Add an Anthropic API key in Settings → Coordination. The local session monitor above works without one.
+                            Add an Anthropic API key in Settings → Integrations → Coordination. The local session monitor above works without one.
                           </p>
                         </>
                       )}

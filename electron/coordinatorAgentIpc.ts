@@ -15,7 +15,7 @@ import type { InteractionResponse } from "./coordinatorAgentTypes";
  * the renderer. Everything with behaviour lives in coordinatorAgent.ts.
  */
 
-const NO_KEY_MESSAGE = "Add an Anthropic API key in Settings → Coordination to use the coordinator.";
+const NO_KEY_MESSAGE = "Add an Anthropic API key in Settings → Integrations → Coordination to use the coordinator.";
 
 let mainWindowRef: BrowserWindow | null = null;
 let agent: CoordinatorAgent | null = null;

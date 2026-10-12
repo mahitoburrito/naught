@@ -105,6 +105,12 @@ renderer):
    `pause_turn` → re-send. Otherwise run every tool call, interaction tools
    awaiting the renderer, and append all results in one `user` message.
 6. Hard cap of 40 steps per turn → error "Coordinator stopped after 40 steps".
+7. `end_turn` with a follow-up queued during the call → one more step so the
+   follow-up is answered. `max_tokens` with no tool call keeps the partial text
+   as the report. `model_context_window_exceeded` → error. `compaction` is
+   re-sent like `pause_turn`. Completed turns are capped at 20 in memory.
+   Each turn carries its own abort controller and cancelled flag; a cancelled
+   turn that settles after a new one started never touches the new state.
 
 Cancellation aborts the stream through an `AbortController`, rejects any
 pending interaction, and marks the turn cancelled with no error.
@@ -132,7 +138,7 @@ requests also go over `coordinator-agent:interaction`. Renderer → main:
 Resolution order: saved key → `ANTHROPIC_API_KEY` → none. The route
 `GET/POST /api/coordinator-agent/config` returns `{ hasApiKey, source:
 "settings" | "env" | null, model }` and accepts `{ apiKey }` (empty string
-removes it), mirroring the title-generation config route. Settings → General
+removes it), mirroring the title-generation config route. Settings → Integrations
 gets a "Coordinator" card with an Anthropic API key field in place of the PRBE
 card. The release workflow no longer writes `resources/default-config.json`.
 

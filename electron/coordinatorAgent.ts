@@ -52,6 +52,13 @@ export const COORDINATOR_PREAMBLE =
 const DEFAULT_MAX_STEPS = 40;
 const MAX_TOKENS = 32000;
 const MAX_DETAIL_CHARS = 4000;
+const MAX_COMPLETED_TURNS = 20;
+
+/** One directive's run. A new turn replaces `current`; a stale loop checks that before touching state. */
+interface Turn {
+  abort: AbortController;
+  cancelled: boolean;
+}
 
 class CoordinatorTurnError extends Error {}
 
@@ -74,7 +81,7 @@ function truncate(text: string): string {
 export function describeCoordinatorError(error: unknown): string {
   if (error instanceof CoordinatorTurnError) return error.message;
   if (error instanceof Anthropic.AuthenticationError) {
-    return "The Anthropic API rejected the key. Update it in Settings → Coordination.";
+    return "The Anthropic API rejected the key. Update it in Settings → Integrations → Coordination.";
   }
   if (error instanceof Anthropic.RateLimitError) {
     return "The Anthropic API is rate limiting requests. Try again shortly.";
@@ -92,8 +99,7 @@ export class CoordinatorAgent {
   private state: CoordinatorAgentState = emptyState();
   private messages: Anthropic.Beta.BetaMessageParam[] = [];
   private queuedMessages: string[] = [];
-  private abort: AbortController | null = null;
-  private cancelled = false;
+  private current: Turn | null = null;
   private pending: { payload: InteractionPayload; resolve: (response: InteractionResponse | null) => void } | null = null;
 
   constructor(private readonly options: CoordinatorAgentOptions) {}
@@ -114,33 +120,42 @@ export class CoordinatorAgent {
     };
     this.messages = [{ role: "user", content: directive }];
     this.queuedMessages = [];
-    this.cancelled = false;
-    this.abort = new AbortController();
+    const turn: Turn = { abort: new AbortController(), cancelled: false };
+    this.current = turn;
     this.emit();
 
     let succeeded = false;
     try {
-      await this.runLoop();
-      succeeded = !this.cancelled;
+      await this.runLoop(turn);
+      succeeded = !this.isStale(turn);
     } catch (error) {
-      if (!this.cancelled) {
+      if (!this.isStale(turn)) {
         this.state.error = describeCoordinatorError(error);
         console.error("[coordinator-agent] Turn failed:", this.state.error);
       }
     } finally {
-      if (succeeded) this.recordCompletedTurn();
-      this.state.isRunning = false;
-      this.abort = null;
-      this.emit();
+      // A cancelled turn that was already replaced must not touch the new turn's state.
+      if (this.current === turn) {
+        if (succeeded) this.recordCompletedTurn();
+        this.state.isRunning = false;
+        this.current = null;
+        this.emit();
+      }
     }
+  }
+
+  private isStale(turn: Turn): boolean {
+    return turn.cancelled || this.current !== turn;
   }
 
   /** Abort the in-flight request and any pending interaction. */
   cancel(): void {
-    if (!this.state.isRunning) return;
-    this.cancelled = true;
-    this.abort?.abort();
+    const turn = this.current;
+    if (!turn || !this.state.isRunning) return;
+    turn.cancelled = true;
+    turn.abort.abort();
     this.pending?.resolve(null);
+    this.pending = null;
     this.addEvent("Cancelled", undefined, true);
     this.state.isRunning = false;
     this.emit();
@@ -161,39 +176,40 @@ export class CoordinatorAgent {
 
   // ---------------------------------------------------------------- loop
 
-  private async runLoop(): Promise<void> {
+  private async runLoop(turn: Turn): Promise<void> {
     const maxSteps = this.options.maxSteps ?? DEFAULT_MAX_STEPS;
     for (let step = 1; step <= maxSteps; step++) {
+      if (this.isStale(turn)) return;
       this.drainQueuedMessages();
-      const stream = this.options.client.beta.messages.stream(this.requestParams(), { signal: this.abort!.signal });
+      const stream = this.options.client.beta.messages.stream(this.requestParams(), { signal: turn.abort.signal });
       const message = await stream.finalMessage();
-      if (this.cancelled) return;
+      if (this.isStale(turn)) return;
 
       this.messages.push({ role: "assistant", content: message.content });
       const toolUses = this.recordAssistantBlocks(message);
+      const stop = message.stop_reason;
 
-      switch (message.stop_reason) {
-        case "refusal":
-          throw new CoordinatorTurnError("Claude declined this directive.");
-        case "max_tokens":
-          throw new CoordinatorTurnError("The coordinator's response was cut off at the token limit.");
-        case "pause_turn":
-          continue;
-        case "tool_use":
-          break;
-        default:
-          this.finishWithReport(message);
-          return;
+      if (stop === "refusal") throw new CoordinatorTurnError("Claude declined this directive.");
+      if (stop === "model_context_window_exceeded") {
+        throw new CoordinatorTurnError("The coordinator ran out of context window.");
       }
-      if (toolUses.length === 0) {
+      // The server paused its own loop; re-send and it resumes where it left off.
+      if (stop === "pause_turn" || stop === "compaction") continue;
+      // A tool call cut off mid-input must not run; plain text cut off is still a usable report.
+      if (stop === "max_tokens" && toolUses.length > 0) {
+        throw new CoordinatorTurnError("The coordinator's response was cut off at the token limit.");
+      }
+      if (stop !== "tool_use" || toolUses.length === 0) {
+        // A follow-up that arrived during the final call still deserves an answer.
+        if (this.queuedMessages.length > 0) continue;
         this.finishWithReport(message);
         return;
       }
 
       const results: Anthropic.Beta.BetaToolResultBlockParam[] = [];
       for (const toolUse of toolUses) {
-        const result = await this.executeTool(toolUse);
-        if (this.cancelled) return;
+        const result = await this.executeTool(toolUse, turn);
+        if (this.isStale(turn)) return;
         results.push(result);
       }
       this.messages.push({ role: "user", content: results });
@@ -244,18 +260,20 @@ export class CoordinatorAgent {
   private finishWithReport(message: Anthropic.Beta.BetaMessage): void {
     const texts = message.content.filter((block): block is Anthropic.Beta.BetaTextBlock => block.type === "text");
     this.state.report = texts.length > 0 ? texts[texts.length - 1].text : this.state.agentMessage || "";
+    // The report is the final word; keep agentMessage for mid-turn replies only.
+    this.state.agentMessage = undefined;
     this.emit();
   }
 
-  private async executeTool(toolUse: Anthropic.Beta.BetaToolUseBlock): Promise<Anthropic.Beta.BetaToolResultBlockParam> {
+  private async executeTool(toolUse: Anthropic.Beta.BetaToolUseBlock, turn: Turn): Promise<Anthropic.Beta.BetaToolResultBlockParam> {
     const inputJson = JSON.stringify(toolUse.input, null, 2);
     const event = this.addEvent(toolUse.name, inputJson, false);
     const result = (INTERACTION_TOOL_NAMES as readonly string[]).includes(toolUse.name)
-      ? await this.runInteraction(toolUse)
-      : await this.options.tools.run(toolUse.name, toolUse.input);
+      ? await this.runInteraction(toolUse, turn)
+      : await this.options.tools.run(toolUse.name, toolUse.input, { signal: turn.abort.signal });
     event.isCompleted = true;
     event.detail = truncate(`${inputJson}\n→ ${result.content}`);
-    this.emit();
+    if (!this.isStale(turn)) this.emit();
     return {
       type: "tool_result",
       tool_use_id: toolUse.id,
@@ -264,7 +282,7 @@ export class CoordinatorAgent {
     };
   }
 
-  private async runInteraction(toolUse: Anthropic.Beta.BetaToolUseBlock): Promise<ToolRunResult> {
+  private async runInteraction(toolUse: Anthropic.Beta.BetaToolUseBlock, turn: Turn): Promise<ToolRunResult> {
     const input = interactionInput(this.options.tools.definitions, toolUse.name, toolUse.input);
     if (!input) return { content: `Invalid input for ${toolUse.name}`, isError: true };
     const interactionId = randomUUID();
@@ -279,9 +297,11 @@ export class CoordinatorAgent {
       this.emit();
       this.options.onInteraction?.(payload);
     });
-    this.pending = null;
-    this.state.pendingInteraction = undefined;
-    if (!response) return { content: "Cancelled before the user answered", isError: true };
+    if (this.pending?.payload.interactionId === interactionId) {
+      this.pending = null;
+      this.state.pendingInteraction = undefined;
+    }
+    if (!response || this.isStale(turn)) return { content: "Cancelled before the user answered", isError: true };
 
     this.state.resolvedInteractions.push({ interactionId, payload, response });
     if (response.type === "ask_question") return { content: `User answered: ${response.answer}`, isError: false };
@@ -298,6 +318,9 @@ export class CoordinatorAgent {
       conversationHistory: this.state.conversationHistory,
       completedAt: new Date().toISOString(),
     });
+    if (this.state.completedTurns.length > MAX_COMPLETED_TURNS) {
+      this.state.completedTurns.splice(0, this.state.completedTurns.length - MAX_COMPLETED_TURNS);
+    }
   }
 
   private addEvent(label: string, detail: string | undefined, completed: boolean): CoordinatorFeedEvent {

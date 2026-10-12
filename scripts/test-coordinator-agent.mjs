@@ -100,6 +100,7 @@ console.log("\ncoordinatorTools");
   check("unknown tool", await tools.run("nope", {}), { content: "Unknown tool: nope", isError: true });
   check("read_session_output tails the buffer", await tools.run("read_session_output", { sessionId: "s1" }), { content: "hello", isError: false });
   check("read_session_output with no buffer", await tools.run("read_session_output", { sessionId: "missing" }), { content: "(no output buffer found for this session)", isError: false });
+  check("read_session_output rejects path-like ids", await tools.run("read_session_output", { sessionId: "../x" }), { content: "Invalid input for read_session_output: sessionId must be a plain session ID", isError: true });
   check("interaction tools are not run here", (await tools.run("ask_user", { question: "?" })).isError, true);
   rmSync(dir, { recursive: true, force: true });
 }
@@ -173,6 +174,7 @@ console.log("\ncoordinatorAgent");
     await agent.startTurn("What is everyone doing?");
     const state = agent.getState();
     check("report is the final text", state.report, "Two sessions idle.");
+    check("final text is not also left as the agent message", state.agentMessage, undefined);
     check("turn finished without error", [state.isRunning, state.error], [false, undefined]);
     check("feed shows thinking then the tool, both completed", state.events.map((e) => [e.label, e.isCompleted]), [["Thinking", true], ["list_active_sessions", true]]);
     check("thinking event carries the summary", state.events[0].detail, "Need the session list");
@@ -311,7 +313,7 @@ console.log("\ncoordinatorAgent");
     const client = fakeClient([authError]);
     const { agent } = makeAgent(client);
     await agent.startTurn("x");
-    check("auth error message", agent.getState().error, "The Anthropic API rejected the key. Update it in Settings → Coordination.");
+    check("auth error message", agent.getState().error, "The Anthropic API rejected the key. Update it in Settings → Integrations → Coordination.");
   }
 
   // 12. guards
@@ -328,6 +330,91 @@ console.log("\ncoordinatorAgent");
     check("second startTurn while running rejects", rejected, "A coordinator turn is already running");
     agent.cancel();
     await run;
+  }
+
+  // 13. cancel during a tool call aborts the fetch; the next turn starts clean
+  {
+    let abortedFetches = 0;
+    const pending = [];
+    const hangingFetch = (url, init = {}) => new Promise((resolve, reject) => {
+      init.signal?.addEventListener("abort", () => { abortedFetches++; reject(Object.assign(new Error("aborted"), { name: "AbortError" })); });
+      pending.push(() => resolve({ ok: true, status: 200, json: async () => [] }));
+    });
+    const hangingTools = createCoordinatorTools({ serverPort: 7000, launchCwd: dir, fetch: hangingFetch });
+    const client = fakeClient([
+      msg([toolUse("t", "list_active_sessions", {})], "tool_use"),
+      msg([text("B done")], "end_turn"),
+    ]);
+    const agent = new CoordinatorAgent({ client, tools: hangingTools });
+    const runA = agent.startTurn("A");
+    await waitFor(() => pending.length === 1, "tool fetch in flight");
+    agent.cancel();
+    await tick();
+    check("stop aborts the in-flight tool fetch", abortedFetches, 1);
+    for (const release of pending) release();
+    await runA;
+    await agent.startTurn("B");
+    check("new turn starts from a clean transcript", client.calls[1].params.messages, [{ role: "user", content: "B" }]);
+    check("only the new turn is recorded", agent.getState().completedTurns.map((t) => t.directive), ["B"]);
+  }
+
+  // 14. a stale loop that settles after a restart must not touch the new turn
+  {
+    const pending = [];
+    const stubbornFetch = () => new Promise((resolve) => pending.push(() => resolve({ ok: true, status: 200, json: async () => [] })));
+    const stubbornTools = createCoordinatorTools({ serverPort: 7000, launchCwd: dir, fetch: stubbornFetch });
+    const client = fakeClient([
+      msg([toolUse("t", "list_active_sessions", {})], "tool_use"),
+      msg([text("B done")], "end_turn"),
+    ]);
+    const agent = new CoordinatorAgent({ client, tools: stubbornTools });
+    const runA = agent.startTurn("A");
+    await waitFor(() => pending.length === 1, "tool fetch pending");
+    agent.cancel();
+    await agent.startTurn("B");
+    check("B finishes while A's fetch is still pending", [agent.getState().report, agent.getState().isRunning], ["B done", false]);
+    pending[0]();
+    await runA;
+    const state = agent.getState();
+    check("stale turn A did not disturb B", [state.report, state.error, state.isRunning, state.completedTurns.map((t) => t.directive), client.calls.length], ["B done", undefined, false, ["B"], 2]);
+  }
+
+  // 15. a follow-up that lands during the final call still reaches the model
+  {
+    const ref = {};
+    const client = fakeClient([
+      async () => { ref.agent.sendMessage("one more thing"); return msg([text("done")], "end_turn"); },
+      msg([text("done again")], "end_turn"),
+    ]);
+    const { agent } = makeAgent(client);
+    ref.agent = agent;
+    await agent.startTurn("look");
+    check("late follow-up triggers one more step", [client.calls.length, client.calls[1].params.messages.at(-1)], [2, { role: "user", content: [{ type: "text", text: "one more thing" }] }]);
+    check("report comes from the last step", agent.getState().report, "done again");
+  }
+
+  // 16. completed turns are capped so the IPC payload stays bounded
+  {
+    const script = [];
+    for (let i = 0; i < 25; i++) script.push(msg([text(`r${i}`)], "end_turn"));
+    const { agent } = makeAgent(fakeClient(script));
+    for (let i = 0; i < 25; i++) await agent.startTurn(`d${i}`);
+    const turns = agent.getState().completedTurns;
+    check("completed turns capped at 20, oldest dropped", [turns.length, turns[0].directive, turns.at(-1).directive], [20, "d5", "d24"]);
+  }
+
+  // 17. max_tokens without a tool call keeps the partial text as the report
+  {
+    const { agent } = makeAgent(fakeClient([msg([text("partial…")], "max_tokens")]));
+    await agent.startTurn("x");
+    check("partial text kept", [agent.getState().report, agent.getState().error], ["partial…", undefined]);
+  }
+
+  // 18. context window exceeded is an error, not a report
+  {
+    const { agent } = makeAgent(fakeClient([msg([text("…")], "model_context_window_exceeded")]));
+    await agent.startTurn("x");
+    check("context window exceeded", [agent.getState().report, agent.getState().error], ["", "The coordinator ran out of context window."]);
   }
   rmSync(dir, { recursive: true, force: true });
 }
