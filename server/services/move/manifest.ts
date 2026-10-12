@@ -222,8 +222,9 @@ export function entriesDiffer(a: Manifest, b: Manifest): string[] {
 }
 
 /**
- * The roots for a session: its cwd, plus for a linked git worktree the mother
- * repository's `.git` directory (the worktree's `.git` file points at it by
+ * The roots for a session: its cwd plus the git directory that makes it a
+ * repository — its own `.git` for a normal checkout, or for a linked worktree
+ * the mother repository's `.git` (the worktree's `.git` file points at it by
  * absolute path, so with mirrored paths git on the node just works).
  */
 export function resolveMoveRoots(cwd: string): MoveRoots {
@@ -234,7 +235,13 @@ export function resolveMoveRoots(cwd: string): MoveRoots {
   const dotGit = join(root, ".git");
   let gitDir: MoveRoots["gitDir"];
   try {
-    if (existsSync(dotGit) && statSync(dotGit).isFile()) {
+    if (existsSync(dotGit) && statSync(dotGit).isDirectory()) {
+      // A normal repository: its own .git travels (the working tree listing
+      // never descends into it), minus any linked worktrees it owns.
+      let linked: string[] = [];
+      try { linked = readdirSync(join(dotGit, "worktrees")); } catch { /* none */ }
+      gitDir = { path: dotGit, excludeWorktrees: linked };
+    } else if (existsSync(dotGit) && statSync(dotGit).isFile()) {
       const pointer = readFileSync(dotGit, "utf-8").trim();
       const match = /^gitdir:\s*(.+)$/.exec(pointer);
       if (match) {

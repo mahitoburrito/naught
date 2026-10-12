@@ -12,24 +12,15 @@ import {
   sessions,
   createSession,
   deleteSession,
-  injectPluginDir,
-  resolveAgentLaunchCommand,
   relaunchSession,
   scanReposInDirectory,
-  DEFAULT_PTY_COLS,
-  DEFAULT_PTY_ROWS,
   scheduleSessionTitleGeneration,
-  getSessionShellLaunch,
   getSessionPtyEnvironment,
-  attachSessionPty,
-  installShellIntegration,
-  startTrackedCommand,
   getTerminalSnapshot,
   resolveTerminalSplitWorkingDirectory,
   getTerminalShellCapabilities,
   getTerminalShellCompletions,
   getTerminalShellEnvironment,
-  resetTerminalLifecycle,
   writeTerminalBlockCommand,
   updateTerminalBlock,
   clearTerminalHistory,
@@ -80,7 +71,6 @@ import { terminalFind, TerminalFindError } from "../services/terminalFind";
 import { sendTerminalMessage } from "../services/terminalTransport";
 import {
   applyAgentStatus,
-  startAgentStatusTicker,
   statusSourceForHookEvent,
 } from "../services/agentStatus";
 import {

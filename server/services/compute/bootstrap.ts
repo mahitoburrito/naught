@@ -177,7 +177,7 @@ export async function buildNodeTar(payload: NodePayload): Promise<{ tar: Buffer;
     for (const file of payload.files ?? []) put(file.target, file.contents, file.mode ?? 0o600);
     put("bootstrap.sh", buildBootstrapScript({ version, installAgents: payload.installAgents }), 0o700);
     const tar = await new Promise<Buffer>((resolve, reject) => {
-      execFile("tar", ["-czf", "-", "-C", staging, "."], { encoding: "buffer", maxBuffer: 64 * 1024 * 1024 }, (error, stdout) => {
+      execFile("tar", ["-czf", "-", "-C", staging, "."], { encoding: "buffer", maxBuffer: 64 * 1024 * 1024, env: { ...process.env, COPYFILE_DISABLE: "1" } }, (error, stdout) => {
         if (error) reject(new Error(`tar failed: ${error.message}`));
         else resolve(stdout as Buffer);
       });

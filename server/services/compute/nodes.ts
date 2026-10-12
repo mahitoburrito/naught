@@ -351,6 +351,8 @@ export function runProvision(nodeId: string): Promise<void> {
       log(`[compute] ${nodeId} failed: ${message}`);
       const current = getNode(nodeId);
       if (!current) return;
+      // A terminate that raced the pipeline already owns the record.
+      if (current.provision.status === "terminating" || current.provision.status === "terminated") return;
       if (current.provision.instanceId) {
         try { await provider.terminate(current.provision.instanceId); } catch { /* best effort */ }
       }

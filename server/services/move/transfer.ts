@@ -85,7 +85,9 @@ export async function pushFiles(devbox: DevboxConfig, paths: string[], deps: Tra
   const spawn = deps.spawn ?? nodeSpawn;
   const localRoot = deps.localRoot ?? "/";
   const remoteRoot = deps.remoteRoot ?? "/";
-  const tar = spawn("tar", localTarCreateArgs(localRoot), { stdio: ["pipe", "pipe", "pipe"] });
+  // COPYFILE_DISABLE stops macOS bsdtar from adding AppleDouble `._*` members
+  // for extended attributes; they would appear as extra files on the node.
+  const tar = spawn("tar", localTarCreateArgs(localRoot), { stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, COPYFILE_DISABLE: "1" } });
   const ssh = spawn("ssh", [...sshArgsFor(devbox), tarExtractCommand(remoteRoot)], { stdio: ["pipe", "ignore", "pipe"] });
   tar.stdout!.pipe(ssh.stdin!);
   tar.stdin!.on("error", () => { /* tar closed early; its exit code tells the story */ });

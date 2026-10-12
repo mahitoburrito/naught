@@ -61,12 +61,12 @@ section("manifest");
   const manifest = await import(join(dist, "services", "move", "manifest.js"));
   const repo = makeRepo();
   const plain = manifest.resolveMoveRoots(repo);
-  check("a normal repo has one root and no git dir", [plain.roots, plain.gitDir], [[repo], undefined]);
+  check("a normal repo brings its own .git along", [plain.roots, plain.gitDir], [[repo], { path: join(repo, ".git"), excludeWorktrees: [] }]);
 
   const built = await manifest.buildLocalManifest(plain, false);
   const rels = [...built.roots[0].entries.keys()].sort();
   check("tracked and untracked files are listed, ignored are not", rels, [".gitignore", "tracked.txt", "untracked.txt"]);
-  check("sizes and hashes are recorded", [built.roots[0].entries.get("tracked.txt").size, built.roots[0].entries.get("tracked.txt").hash.length, built.files, built.bytes], [8, 64, 3, 44]);
+  check("sizes and hashes are recorded", [built.roots[0].entries.get("tracked.txt").size, built.roots[0].entries.get("tracked.txt").hash.length, built.roots[0].files, built.roots[0].bytes, built.roots[1].entries.has("HEAD")], [8, 64, 3, 44, true]);
   const withIgnored = await manifest.buildLocalManifest(plain, true);
   check("include-ignored adds the ignored files", [...withIgnored.roots[0].entries.keys()].sort(), [".gitignore", "ignored.txt", "node_modules/dep/index.js", "tracked.txt", "untracked.txt"]);
   const again = await manifest.buildLocalManifest(plain, false);
@@ -95,7 +95,7 @@ section("manifest");
   const gitRels = [...linkedManifest.roots[1].entries.keys()];
   check("the worktree's .git pointer file is included", wtRels, [".git", ".gitignore", "tracked.txt", "wip.txt"]);
   check("the mother .git carries HEAD and this worktree's metadata, not the sibling's", [gitRels.includes("HEAD"), gitRels.some((r) => r.startsWith(`worktrees/${repo.split("/").pop()}-wt-feature/`)), gitRels.some((r) => r.startsWith(`worktrees/${repo.split("/").pop()}-wt-other/`))], [true, true, false]);
-  check("remote manifest command guards missing roots", manifest.remoteManifestCommand(plain, false).startsWith(`{ [ -d '${repo}' ] && python3 "$HOME/.naught/naught_manifest.py" '--root' '${repo}' || true; }`), true);
+  check("remote manifest command guards missing roots", manifest.remoteManifestCommand(plain, false).startsWith(`{ [ -d '${repo}' ] && python3 "$HOME/.naught/naught_manifest.py" '--root' '${repo}' '--git-dir' '${join(repo, ".git")}' || true; }`), true);
 
   const nonGit = temp("naught-plain-");
   writeFileSync(join(nonGit, "a.txt"), "a");
@@ -287,7 +287,7 @@ section("move state machine");
   const settled = async () => { for (let i = 0; i < 400; i++) { if (["done", "error"].includes(session.move?.state)) return session.move; await new Promise((r) => setTimeout(r, 10)); } return session.move; };
 
   const plan = await move.planMoveOut("s1", { nodeId: "node-1" });
-  check("plan: ok with the claude session found and a manifest", [plan.ok, plan.harness.kind, plan.harness.sessionId, plan.harness.found, plan.manifest.files, plan.credential, plan.agentState, plan.destination], [true, "claude", "cid-1", true, 3, "CLAUDE_CODE_OAUTH_TOKEN", "idle", { id: "node-1", name: "gpu-1" }]);
+  check("plan: ok with the claude session found and a manifest", [plan.ok, plan.harness.kind, plan.harness.sessionId, plan.harness.found, plan.manifest.files >= 3, plan.manifest.roots.length, plan.credential, plan.agentState, plan.destination], [true, "claude", "cid-1", true, true, 2, "CLAUDE_CODE_OAUTH_TOKEN", "idle", { id: "node-1", name: "gpu-1" }]);
   check("plan: ignored files are offered with their extra size", plan.includeIgnoredExtraBytes, 9);
   check("plan refuses a missing node", (await move.planMoveOut("s1", { nodeId: "nope", manifest: false })).refusals, ["Destination node not found."]);
   secrets.updateEnvValue("CLAUDE_CODE_OAUTH_TOKEN", "");
@@ -299,10 +299,11 @@ section("move state machine");
   let result = await settled();
   check("the move runs every step to done", states, ["out:waiting-idle", "out:prepare", "out:quiesce", "out:sync-files", "out:sync-agent", "out:relaunch", "out:verify", "out:done"]);
   check("quiesce typed the harness exit command", calls.find((c) => c[0] === "write"), ["write", "/exit"]);
-  check("files were pushed by absolute path, then the agent state under the node home", calls.filter((c) => c[0] === "push").map((c) => [c[1].length, c[2]]), [[3, "mirror"], [2, "home"]]);
+  check("files were pushed by absolute path, then the agent state under the node home", calls.filter((c) => c[0] === "push").map((c) => [c[2] === "home" ? c[1].length : c[1].length >= 3, c[2]]), [[true, "mirror"], [2, "home"]]);
+  check("the working tree files are in the first push", calls.filter((c) => c[0] === "push")[0][1].filter((p) => !p.includes("/.git/")), ["<repo>/.gitignore", "<repo>/tracked.txt", "<repo>/untracked.txt"]);
   check("agent state covers the transcript and todos", calls.filter((c) => c[0] === "push")[1][1], ["~/.claude/projects/" + repo.replace(/[^A-Za-z0-9]/g, "-") + "/cid-1.jsonl", "~/.claude/todos/cid-1-agent.json"]);
   check("relaunch used the resume command on the node at the same path", relaunched[0], { command: "claude --resume cid-1", devboxId: "node-1", remotePath: repo });
-  check("done records the manifest and history", [result.state, result.manifest.files, result.history.length, result.history[0].direction, session.devboxId], ["done", 3, 1, "out", "node-1"]);
+  check("done records the manifest and history", [result.state, result.manifest.files >= 3, result.history.length, result.history[0].direction, session.devboxId], ["done", true, 1, "out", "node-1"]);
   check("GET move", (await call("GET", "/api/sessions/s1/move")).body.move.state, "done");
   check("a second move out is refused while remote", (await call("POST", "/api/sessions/s1/move", { nodeId: "node-1" })).status, 400);
 

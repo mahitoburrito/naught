@@ -4,7 +4,7 @@
 // server on port 7968 with a scratch LAUNCH_CWD so the real app is untouched.
 
 import { execFileSync, spawn } from "child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { dirname, join } from "path";
 import { fileURLToPath } from "url";
@@ -34,7 +34,8 @@ try {
   process.exit(0);
 }
 
-const scratch = mkdtempSync(join(tmpdir(), "naught-docker-"));
+// Physical path: the server mirrors realpaths, and the container must be asked for the same ones.
+const scratch = realpathSync(mkdtempSync(join(tmpdir(), "naught-docker-")));
 process.env.LAUNCH_CWD = scratch;
 process.env.OPENUI_QUIET = "1";
 
@@ -120,7 +121,7 @@ try {
 
   // ── move out ───────────────────────────────────────────────────────────
   const plan = await api("POST", `/api/sessions/${sessionId}/move/plan`, { nodeId });
-  check("plan is ok for a shell session", [plan.body.ok, plan.body.harness.kind, plan.body.manifest.files], [true, "shell", 3]);
+  check("plan is ok for a shell session", [plan.body.ok, plan.body.harness.kind, plan.body.manifest.roots.length, plan.body.manifest.files >= 3], [true, "shell", 2, true]);
   const moved = await api("POST", `/api/sessions/${sessionId}/move`, { nodeId, whenIdle: false });
   check("move accepted", moved.status, 202);
   let move = null;
@@ -130,9 +131,9 @@ try {
     await sleep(1000);
   }
   check("move completed", [move?.state, move?.error], ["done", undefined]);
-  const remoteLs = sh("docker", ["exec", container, "sh", "-c", `ls -1 ${repo} && cat ${repo}/untracked.txt`]);
-  check("files are on the node at the same path, ignored ones stayed home", remoteLs.split("\n"), [".gitignore", "tracked.txt", "untracked.txt", "untracked"]);
-  const remoteGit = sh("docker", ["exec", container, "sh", "-c", `cd ${repo} && git status --porcelain && git log --oneline | head -1`]);
+  const remoteLs = sh("docker", ["exec", "-u", "node", container, "sh", "-c", `ls -1A ${repo} && cat ${repo}/untracked.txt`]);
+  check("files are on the node at the same path, ignored ones stayed home", remoteLs.split("\n"), [".git", ".gitignore", "tracked.txt", "untracked.txt", "untracked"]);
+  const remoteGit = sh("docker", ["exec", "-u", "node", container, "sh", "-c", `cd ${repo} && git status --porcelain && git log --oneline | head -1`]);
   check("git works on the node", remoteGit.includes("?? untracked.txt") && remoteGit.includes("init"), true);
   const sessionsAfter = (await api("GET", "/api/sessions")).body.find((s) => s.sessionId === sessionId);
   check("the session now points at the node", [sessionsAfter.devboxId, sessionsAfter.remotePath], [nodeId, repo]);
