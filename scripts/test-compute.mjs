@@ -600,5 +600,82 @@ section("node orchestrator");
   nodes.stopNodeTicker();
 }
 
+
+// ─── routes ─────────────────────────────────────────────────────────────────
+
+section("compute routes");
+{
+  const { Hono } = await import("hono");
+  const { computeRoutes } = await import(join(dist, "routes", "compute.js"));
+  const nodes = await import(join(dist, "services", "compute", "nodes.js"));
+  const secrets = await import(join(dist, "services", "secrets.js"));
+  const app = new Hono().route("/api/compute", computeRoutes);
+  const call = async (method, path, body) => {
+    const res = await app.request(`http://local${path}`, { method, headers: body ? { "Content-Type": "application/json" } : {}, body: body ? JSON.stringify(body) : undefined });
+    return { status: res.status, body: await res.json().catch(() => null) };
+  };
+  const fake = {
+    id: "modal",
+    async configured() { return { ok: true, source: "env" }; },
+    async test() { return { ok: true, message: "Connected · 0 sandboxes live" }; },
+    async offers() { return [{ provider: "modal", gpuCount: 0, cpu: 2, memoryGb: 8, hourlyUsd: 0.48, label: "CPU only" }]; },
+    estimateHourlyUsd() { return 0.48; },
+    async provision() { return { instanceId: "sb-r" }; },
+    async waitReady() { return { host: "2.2.2.2", port: 22, user: "root" }; },
+    async status() { return "ready"; },
+    async terminate() {},
+  };
+  let now = 5_000_000;
+  nodes.configureNodes({
+    providers: () => ({ modal: fake }),
+    now: () => now,
+    mailer: async () => ({ sent: true }),
+    bootstrap: async () => ({ ok: true, versions: {}, warnings: [], assetVersion: "v" }),
+    sessions: () => new Map(),
+    waitReadyTimeoutMs: 2000,
+  });
+
+  await withLaunchCwd(async () => {
+    const providers = await call("GET", "/api/compute/providers");
+    check("providers lists both without values", [providers.status, providers.body.providers.map((p) => [p.id, p.ok, p.source])], [200, [["modal", true, "env"], ["thunder", false, undefined]]]);
+    check("a thunder key is stored", [(await call("PUT", "/api/compute/providers/thunder/key", { token: "tnr_x" })).status, secrets.readEnvFile().TNR_API_TOKEN], [200, "tnr_x"]);
+    check("modal needs both halves", (await call("PUT", "/api/compute/providers/modal/key", { tokenId: "a" })).status, 400);
+    await call("PUT", "/api/compute/providers/modal/key", { tokenId: "ak", tokenSecret: "as" });
+    check("modal key stored", [secrets.readEnvFile().MODAL_TOKEN_ID, secrets.readEnvFile().MODAL_TOKEN_SECRET], ["ak", "as"]);
+    check("deleting clears the key", [(await call("DELETE", "/api/compute/providers/thunder/key")).status, secrets.readEnvFile().TNR_API_TOKEN], [200, undefined]);
+    check("unknown provider is 404", (await call("DELETE", "/api/compute/providers/nope/key")).status, 404);
+    check("test runs the provider", (await call("POST", "/api/compute/providers/modal/test")).body, { ok: true, message: "Connected · 0 sandboxes live" });
+    check("offers for one provider", (await call("GET", "/api/compute/offers?provider=modal")).body.offers.length, 1);
+    check("offers for an unavailable provider report the error", (await call("GET", "/api/compute/offers?provider=thunder")).status, 502);
+    check("offers for all providers collect errors", (await call("GET", "/api/compute/offers")).body.errors.map((e) => e.provider), ["thunder"]);
+
+    nodes.saveComputeConfig({ policy: { maxConcurrentNodes: 1 }, notifications: { to: "me@prbe.ai" } });
+    const created = await call("POST", "/api/compute/nodes", { provider: "modal", name: "r1", requestedBy: { kind: "session", sessionId: "s1" } });
+    check("creating a node inside policy is 201", [created.status, created.body.node.provision.status, created.body.node.provision.requestedBy], [201, "provisioning", { kind: "session", sessionId: "s1" }]);
+    await nodes.waitForNode(created.body.node.id, 3000);
+    const list = await call("GET", "/api/compute/nodes");
+    check("nodes summary", [list.body.live, list.body.pending, list.body.hourlyUsd, list.body.nodes[0].provision.status], [1, 0, 0.48, "ready"]);
+    check("one node", (await call("GET", `/api/compute/nodes/${created.body.node.id}`)).body.node.host, "2.2.2.2");
+    check("unknown node is 404", (await call("GET", "/api/compute/nodes/node-x")).status, 404);
+    const parked = await call("POST", "/api/compute/nodes", { provider: "modal", name: "r2" });
+    check("over policy is 202 with reasons", [parked.status, parked.body.pending, parked.body.reasons], [202, true, ["Already 1 of 1 nodes live"]]);
+    check("deny", (await call("POST", `/api/compute/nodes/${parked.body.node.id}/deny`)).body.node.provision.status, "terminated");
+    const parked2 = await call("POST", "/api/compute/nodes", { provider: "modal", name: "r3" });
+    check("approve starts provisioning", (await call("POST", `/api/compute/nodes/${parked2.body.node.id}/approve`)).body.node.provision.status, "provisioning");
+    await nodes.waitForNode(parked2.body.node.id, 3000);
+    check("terminate through DELETE", (await call("DELETE", `/api/compute/nodes/${created.body.node.id}`, { requestedBy: { kind: "session", sessionId: "s1" } })).body.node.provision.terminateReason, "agent");
+    check("bad provider is 400", (await call("POST", "/api/compute/nodes", { provider: "aws" })).status, 400);
+
+    check("policy defaults", (await call("GET", "/api/compute/policy")).body.policy.maxConcurrentNodes, 1);
+    check("policy update normalises", (await call("PUT", "/api/compute/policy", { maxHourlyUsd: "9", allowedGpus: ["H100"] })).body.policy, { maxConcurrentNodes: 1, allowedGpus: ["H100"], maxLifetimeHours: 8, maxHourlyUsd: 9 });
+    const notify = await call("PUT", "/api/compute/notifications", { resendApiKey: "re_k", reminderHours: 2, to: "ops@prbe.ai" });
+    check("notifications update stores the key and settings", [notify.body.hasResendKey, notify.body.notifications.reminderHours, notify.body.notifications.to, secrets.readEnvFile().RESEND_API_KEY], [true, 2, "ops@prbe.ai", "re_k"]);
+    await call("PUT", "/api/compute/notifications", { resendApiKey: "" });
+    check("test email without a key is skipped, not an error", (await call("POST", "/api/compute/notifications/test")).body, { sent: false, skipped: "no-api-key" });
+    const creds = await call("PUT", "/api/compute/node-credentials", { claudeToken: "sk-ant-oat", syncCodexAuth: true });
+    check("node credentials", [creds.body, secrets.readEnvFile().CLAUDE_CODE_OAUTH_TOKEN], [{ hasClaudeToken: true, hasOpenAiKey: false, syncCodexAuth: true }, "sk-ant-oat"]);
+  });
+}
+
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed ? 1 : 0);

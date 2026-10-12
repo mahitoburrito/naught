@@ -38,6 +38,7 @@ import { reapProcessTreeDetached } from "./processTree";
 import { TerminalLifecycle } from "./terminalLifecycle";
 import { terminalFind, type TerminalFindBlockIndexEntry } from "./terminalFind";
 import { sendTerminalMessage } from "./terminalTransport";
+import { naughtCliSourcePath } from "./compute/bootstrap";
 import {
   applyAgentStatus,
   disposeAgentStatus,
@@ -1531,6 +1532,17 @@ export function prepareShellShimEnvironment(
       ].join("\n"), true);
       created++;
     }
+  }
+
+  // The agent-facing CLI. Sessions reach the server through OPENUI_PORT,
+  // which rides in the PTY environment already.
+  const naughtCli = naughtCliSourcePath();
+  if (naughtCli && isAbsolute(process.execPath)) {
+    writePrivateRuntimeFile(join(shimDirectory, "naught"), [
+      "#!/bin/sh",
+      `ELECTRON_RUN_AS_NODE=1 exec ${quotePosix(process.execPath)} ${quotePosix(naughtCli)} "$@"`,
+    ].join("\n"), true);
+    created++;
   }
 
   const realSsh = executableOnPath("ssh", originalPath);

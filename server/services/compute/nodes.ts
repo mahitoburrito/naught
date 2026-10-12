@@ -78,6 +78,10 @@ export function configureNodes(partial: Partial<NodesDeps>): void {
   deps = { ...deps, ...partial };
 }
 
+export function providerRegistry(): Partial<Record<ProviderId, ComputeProvider>> {
+  return deps.providers();
+}
+
 // ─── config ────────────────────────────────────────────────────────────────
 
 let detectedRecipient: string | null | undefined;

@@ -9,6 +9,7 @@ import {
   updateDevbox,
 } from "../services/devboxes";
 import { appendSshConfigHost, sshConfigPath } from "../services/sshConfig";
+import { terminateNode } from "../services/compute/nodes";
 
 export const devboxRoutes = new Hono();
 
@@ -60,8 +61,21 @@ devboxRoutes.put("/:id", async (c) => {
   }
 });
 
-devboxRoutes.delete("/:id", (c) => {
-  deleteDevbox(c.req.param("id"));
+devboxRoutes.delete("/:id", async (c) => {
+  const id = c.req.param("id");
+  const existing = getDevbox(id);
+  if (existing?.source === "provisioned" && existing.provision) {
+    const status = existing.provision.status;
+    if (status === "terminated" || status === "error") {
+      deleteDevbox(id);
+      return c.json({ ok: true, removed: true });
+    }
+    // A live node is terminated, never silently forgotten: the record stays
+    // until the provider confirms it is gone.
+    const node = await terminateNode(id, "user");
+    return c.json({ ok: !!node && node.provision.status === "terminated", terminated: true, node });
+  }
+  deleteDevbox(id);
   return c.json({ ok: true });
 });
 
