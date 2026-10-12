@@ -174,5 +174,79 @@ section("policy");
   check("normalise of garbage is the defaults", normaliseComputeConfig(null), DEFAULT_COMPUTE_CONFIG);
 }
 
+
+// ─── ssh keypair ────────────────────────────────────────────────────────────
+
+section("ssh keypair");
+{
+  const keys = await import(join(dist, "services", "compute", "sshKeys.js"));
+  await withLaunchCwd(async (dir) => {
+    keys.resetNaughtKeypairCache();
+    const first = await keys.ensureNaughtKeypair();
+    const privateKeyPath = join(dir, ".openui-desktop", "keys", "naught_ed25519");
+    check("private key lands under the launch dir", first.privateKeyPath, privateKeyPath);
+    check("private key is owner-only", statSync(privateKeyPath).mode & 0o077, 0);
+    check("public key is a single ed25519 line", first.publicKey.startsWith("ssh-ed25519 ") && !first.publicKey.includes("\n"), true);
+    const mtime = statSync(privateKeyPath).mtimeMs;
+    keys.resetNaughtKeypairCache();
+    const second = await keys.ensureNaughtKeypair();
+    check("a second call reuses the key", [second.publicKey === first.publicKey, statSync(privateKeyPath).mtimeMs === mtime], [true, true]);
+  });
+}
+
+// ─── notifications ──────────────────────────────────────────────────────────
+
+section("notifications");
+{
+  const notify = await import(join(dist, "services", "compute", "notify.js"));
+  const now = 10 * 3_600_000;
+  const node = {
+    id: "node-abc", name: "gpu-1", source: "provisioned", inSshConfig: false, host: "h", user: "root", port: 22,
+    provision: {
+      provider: "modal", instanceId: "sb-1", gpu: "H100", gpuCount: 1, cpu: 4, memoryGb: 16, status: "ready",
+      requestedBy: { kind: "user" }, requestedAt: 0, startedAt: now - 2.5 * 3_600_000, hourlyUsd: 3.95,
+      maxLifetimeHours: 8, lastActivityAt: now - 90 * 60_000, emails: { reminderCount: 0, idleAlertCount: 0 },
+    },
+  };
+  const config = { to: "me@prbe.ai", from: "Naught <naught@prbe.ai>", reminderHours: 4, idleAlertMinutes: 60 };
+  const calls = [];
+  const fetchStub = async (url, init) => {
+    calls.push({ url, init });
+    return { ok: true, status: 200, statusText: "OK", json: async () => ({ id: "email-1" }), text: async () => "" };
+  };
+  check("idempotency keys", [
+    notify.idempotencyKey("n", "started"), notify.idempotencyKey("n", "reminder", 3),
+    notify.idempotencyKey("n", "idle", 1), notify.idempotencyKey("n", "terminated"),
+  ], ["naught-n-started", "naught-n-reminder-3", "naught-n-idle-1", "naught-n-terminated"]);
+  check("uptime formatting", [notify.formatUptime(5 * 60_000), notify.formatUptime(2 * 3_600_000), notify.formatUptime(2.5 * 3_600_000)], ["5 min", "2 h", "2 h 30 min"]);
+  check("estimated cost", Number(notify.estimatedCost(node.provision, now).toFixed(3)), 9.875);
+
+  const started = await notify.sendNodeEmail({ kind: "started", node, attachedSessions: ["sess A"], now, config, apiKey: "re_x" }, fetchStub);
+  check("started mail is sent", started, { sent: true, id: "email-1" });
+  const req = calls[0];
+  const body = JSON.parse(req.init.body);
+  check("posted to Resend with the bearer and the idempotency key", [req.url, req.init.headers.Authorization, req.init.headers["Idempotency-Key"]], [notify.RESEND_EMAILS_URL, "Bearer re_x", "naught-node-abc-started"]);
+  check("from/to come from the settings", [body.from, body.to], ["Naught <naught@prbe.ai>", ["me@prbe.ai"]]);
+  check("subject names the node, the spec and the estimate", body.subject, "[Naught] gpu-1 is live: H100 · 4 vCPU · 16 GB at $3.95/hr est.");
+  check("body says how to stop it", body.text.includes("naught node terminate node-abc") && body.text.includes("Settings → Devboxes") && body.text.includes("sess A"), true);
+
+  await notify.sendNodeEmail({ kind: "reminder", n: 2, node, attachedSessions: [], now, config, apiKey: "re_x" }, fetchStub);
+  check("reminder key carries its ordinal", calls[1].init.headers["Idempotency-Key"], "naught-node-abc-reminder-2");
+  check("reminder subject carries uptime and cost", JSON.parse(calls[1].init.body).subject, "[Naught] gpu-1 still live after 2 h 30 min ($9.88 est.)");
+  await notify.sendNodeEmail({ kind: "idle", n: 1, node, attachedSessions: [], now, config, apiKey: "re_x" }, fetchStub);
+  check("idle subject carries the idle time", JSON.parse(calls[2].init.body).subject, "[Naught] gpu-1 has been idle for 1 h 30 min ($9.88 est.)");
+  await notify.sendNodeEmail({ kind: "terminated", node: { ...node, provision: { ...node.provision, terminatedAt: now, terminateReason: "max-lifetime" } }, attachedSessions: [], now, config, apiKey: "re_x" }, fetchStub);
+  check("terminated key", calls[3].init.headers["Idempotency-Key"], "naught-node-abc-terminated");
+
+  check("no recipient skips without calling Resend", await notify.sendNodeEmail({ kind: "started", node, attachedSessions: [], now, config: { ...config, to: undefined }, apiKey: "re_x" }, fetchStub), { sent: false, skipped: "no-recipient" });
+  check("no api key skips", await notify.sendNodeEmail({ kind: "started", node, attachedSessions: [], now, config, apiKey: undefined }, fetchStub), { sent: false, skipped: "no-api-key" });
+  check("still four calls", calls.length, 4);
+  let message = "";
+  try {
+    await notify.sendNodeEmail({ kind: "started", node, attachedSessions: [], now, config, apiKey: "re_x" }, async () => ({ ok: false, status: 422, statusText: "Unprocessable", text: async () => "domain not verified", json: async () => ({}) }));
+  } catch (error) { message = error.message; }
+  check("a rejected send surfaces Resend's answer", message, "Resend 422: domain not verified");
+}
+
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed ? 1 : 0);
