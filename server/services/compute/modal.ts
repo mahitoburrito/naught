@@ -76,7 +76,10 @@ export function buildModalImageCommands(spec: Pick<ComputeSpec, "gpu">, publicKe
     base,
     commands: [
       "ENV DEBIAN_FRONTEND=noninteractive",
-      "RUN apt-get update && apt-get install -y --no-install-recommends openssh-server git rsync curl ca-certificates python3 nodejs npm tar && rm -rf /var/lib/apt/lists/*",
+      "RUN apt-get update && apt-get install -y --no-install-recommends openssh-server git rsync curl ca-certificates gnupg python3 tar && rm -rf /var/lib/apt/lists/*",
+      // Ubuntu 22.04's packaged nodejs is v12: too old for the Codex CLI and for
+      // the naught CLI's fetch. NodeSource gives a current LTS.
+      "RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && apt-get install -y --no-install-recommends nodejs && rm -rf /var/lib/apt/lists/*",
       "RUN curl -fsSL https://claude.ai/install.sh | bash",
       "RUN npm install -g @openai/codex",
       "RUN mkdir -p /run/sshd /root/.ssh && chmod 700 /root/.ssh",

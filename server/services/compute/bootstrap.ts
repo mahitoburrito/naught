@@ -124,8 +124,17 @@ export function buildBootstrapScript(input: { version: string; installAgents: bo
           "if ! command -v claude >/dev/null 2>&1; then",
           "  if command -v curl >/dev/null 2>&1; then curl -fsSL https://claude.ai/install.sh | bash >/dev/null 2>&1 || warn 'claude install failed'; else warn 'curl missing, claude not installed'; fi",
           "fi",
+          // Node 18+ is needed by the Codex CLI and by naught itself; distro
+          // packages on older images are too old, so NodeSource when allowed.
+          "node_ok() { command -v node >/dev/null 2>&1 && [ \"$(node -p 'process.versions.node.split(\".\")[0]' 2>/dev/null || echo 0)\" -ge 18 ]; }",
+          "if ! node_ok; then",
+          "  if command -v apt-get >/dev/null 2>&1; then",
+          "    if [ \"$(id -u)\" = 0 ]; then SUDO=''; elif command -v sudo >/dev/null 2>&1; then SUDO='sudo -n'; else SUDO=''; fi",
+          "    { curl -fsSL https://deb.nodesource.com/setup_22.x | $SUDO bash - >/dev/null 2>&1 && $SUDO apt-get install -y --no-install-recommends nodejs >/dev/null 2>&1; } || warn 'node install failed'",
+          "  else warn 'node too old and no apt-get; codex not installed'; fi",
+          "fi",
           "if ! command -v codex >/dev/null 2>&1; then",
-          "  if command -v npm >/dev/null 2>&1; then npm install -g @openai/codex >/dev/null 2>&1 || warn 'codex install failed'; else warn 'npm missing, codex not installed'; fi",
+          "  if node_ok && command -v npm >/dev/null 2>&1; then npm install -g @openai/codex >/dev/null 2>&1 || warn 'codex install failed'; else warn 'npm missing or node too old, codex not installed'; fi",
           "fi",
         ]
       : []),

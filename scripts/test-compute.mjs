@@ -326,7 +326,7 @@ section("modal provider");
   check("gpu specs build on the CUDA image", gpuImage.base, "nvidia/cuda:12.4.0-devel-ubuntu22.04");
   check("cpu specs build on plain ubuntu", modal.buildModalImageCommands({}, "k").base, "ubuntu:22.04");
   const joined = gpuImage.commands.join("\n");
-  check("image installs sshd, git, rsync, python and node", joined.includes("openssh-server git rsync curl ca-certificates python3 nodejs npm"), true);
+  check("image installs sshd, git, rsync, python and a current node", joined.includes("openssh-server git rsync curl ca-certificates gnupg python3 tar") && joined.includes("deb.nodesource.com/setup_22.x"), true);
   check("image installs both agent CLIs", joined.includes("https://claude.ai/install.sh | bash") && joined.includes("npm install -g @openai/codex"), true);
   check("image bakes the public key", joined.includes("echo 'ssh-ed25519 AAAA naught' > /root/.ssh/authorized_keys"), true);
   check("image prepares sshd", joined.includes("mkdir -p /run/sshd") && joined.includes("PermitRootLogin prohibit-password"), true);
