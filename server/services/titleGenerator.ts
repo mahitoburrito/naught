@@ -1,6 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
-import { join } from "path";
-import { homedir } from "os";
+import { readEnvFile as loadEnvFile, updateEnvValue } from "./secrets";
 
 const GEMINI_API = "https://generativelanguage.googleapis.com/v1beta";
 const DEFAULT_MODEL = "gemini-2.5-flash";
@@ -58,63 +56,6 @@ export interface TitleSortGroup {
   label: string;
   reason?: string;
   nodeIds: string[];
-}
-
-function getLaunchCwd(): string {
-  return process.env.LAUNCH_CWD || homedir();
-}
-
-function getEnvFile(): string {
-  return join(getLaunchCwd(), ".openui-desktop", ".env");
-}
-
-function getHomeEnvFile(): string {
-  return join(homedir(), ".openui-desktop", ".env");
-}
-
-function loadEnvFile(): Record<string, string> {
-  const files = Array.from(new Set([getHomeEnvFile(), getEnvFile()]));
-  const vars: Record<string, string> = {};
-  try {
-    for (const file of files) {
-      if (!existsSync(file)) continue;
-      for (const line of readFileSync(file, "utf-8").split("\n")) {
-        const trimmed = line.trim();
-        if (!trimmed || trimmed.startsWith("#")) continue;
-        const [key, ...valueParts] = trimmed.split("=");
-        if (!key || valueParts.length === 0) continue;
-        let value = valueParts.join("=");
-        if (
-          (value.startsWith('"') && value.endsWith('"')) ||
-          (value.startsWith("'") && value.endsWith("'"))
-        ) {
-          value = value.slice(1, -1);
-        }
-        vars[key.trim()] = value;
-      }
-    }
-    return vars;
-  } catch {
-    return vars;
-  }
-}
-
-function updateEnvValue(key: string, value: string): void {
-  const dir = join(getLaunchCwd(), ".openui-desktop");
-  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-
-  const file = getEnvFile();
-  const existing = existsSync(file) ? readFileSync(file, "utf-8") : "";
-  const lines = existing
-    .split("\n")
-    .filter((line) => !line.trim().startsWith(`${key}=`));
-
-  let next = lines.join("\n").trimEnd();
-  if (value) {
-    if (next) next += "\n";
-    next += `${key}="${value.replace(/"/g, '\\"')}"`;
-  }
-  writeFileSync(file, next ? `${next}\n` : "");
 }
 
 export function loadTitleGenerationConfig(): {
