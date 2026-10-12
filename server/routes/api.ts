@@ -1953,7 +1953,9 @@ apiRoutes.get("/sessions", (c) => {
     cwd: session.cwd,
     originalCwd: session.originalCwd,
     devboxId: session.devboxId,
+    devboxName: session.devboxId ? getDevbox(session.devboxId)?.name : undefined,
     remotePath: session.remotePath,
+    move: session.move,
     gitBranch: session.gitBranch,
     status: session.status,
     statusChangedAt: session.statusChangedAt,
@@ -3310,6 +3312,8 @@ apiRoutes.post("/status-update", async (c) => {
     }
     if (hookEvent === "SessionEnd") {
       session.claudeSessionId = undefined;
+    } else if (typeof body.transcriptPath === "string" && body.transcriptPath.length <= 4096) {
+      session.transcriptPath = body.transcriptPath;
     }
 
     if (userPrompt && matchedSessionId) {
