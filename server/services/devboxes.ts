@@ -140,6 +140,50 @@ export function buildDevboxLaunchCommand(
   return `ssh ${target} -t ${quoteForRemoteShell(remote)}`;
 }
 
+export interface DevboxLaunch {
+  /** Typed first: a bare `ssh <target>` the session shim instruments. */
+  launch: string;
+  /** Typed once the remote shell is up. */
+  remote: string;
+  /** The old `-t` form, for when the shim is unavailable. */
+  legacy: string;
+}
+
+function withRemotePluginDir(command: string): string {
+  const token = command.split(/\s+/)[0] || "";
+  if (token !== "claude" || command.includes("--plugin-dir")) return command;
+  return `claude --plugin-dir "$HOME/.naught/claude-code-plugin"${command.slice(token.length)}`;
+}
+
+/**
+ * The two-step launch: connect bare so the remote protocol attaches (file
+ * reads, diffs, completions), then run the agent in that shell. Hooks on the
+ * box post back through the reverse tunnel when its port is known.
+ */
+export function buildDevboxLaunch(
+  devbox: DevboxConfig,
+  agentCommand: string,
+  remotePath?: string,
+  options: { hooks?: { port: number; sessionId: string } } = {},
+): DevboxLaunch {
+  const target = buildSshTarget(devbox).map(quoteForRemoteShell).join(" ");
+  const path = (remotePath || devbox.defaultPath || "").trim();
+  const parts: string[] = [];
+  if (path) parts.push(`cd ${quoteForRemoteShell(path)} || exit 1`);
+  parts.push('[ -f "$HOME/.naught/env" ] && . "$HOME/.naught/env"');
+  parts.push('export PATH="$HOME/.naught/bin:$HOME/.local/bin:$PATH"');
+  if (options.hooks) {
+    parts.push(`export OPENUI_HOST=127.0.0.1 OPENUI_PORT=${options.hooks.port} OPENUI_SESSION_ID=${quoteForRemoteShell(options.hooks.sessionId)}`);
+  }
+  const trimmed = agentCommand.trim();
+  parts.push(`exec ${trimmed ? withRemotePluginDir(trimmed) : "$SHELL -l"}`);
+  return {
+    launch: `ssh ${target}`,
+    remote: parts.join("; "),
+    legacy: buildDevboxLaunchCommand(devbox, agentCommand, remotePath),
+  };
+}
+
 export interface DevboxTestResult {
   ok: boolean;
   message: string;

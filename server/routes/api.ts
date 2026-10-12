@@ -14,6 +14,7 @@ import {
   deleteSession,
   injectPluginDir,
   resolveAgentLaunchCommand,
+  relaunchSession,
   scanReposInDirectory,
   DEFAULT_PTY_COLS,
   DEFAULT_PTY_ROWS,
@@ -103,7 +104,7 @@ import {
 import { readPackageScriptManifest } from "../services/terminalManifests";
 import { execGit, execGitWithInput } from "../services/gitRuntime";
 import { terminalRemoteManager } from "../services/terminalRemote";
-import { buildDevboxLaunchCommand, getDevbox } from "../services/devboxes";
+import { getDevbox } from "../services/devboxes";
 import type { DevboxConfig } from "../types";
 import { terminalWorkspace, TerminalWorkspaceError } from "../services/terminalWorkspace";
 import { terminalFiles, TerminalFilesError } from "../services/terminalFiles";
@@ -344,11 +345,13 @@ async function startSessionFromApiInput(
   // here rather than in the client so the quoting stays in one tested place,
   // and so the local cwd stays a real local directory — pty.spawn needs one,
   // and the ssh client has to run somewhere.
+  // The session keeps the bare agent command; the launch wrapping (bare ssh,
+  // then the agent in the remote shell) happens in sessionManager when the
+  // PTY starts, so restarts and moves build it the same way.
   let devbox: DevboxConfig | null = null;
   if (input.devboxId) {
     devbox = getDevbox(input.devboxId);
     if (!devbox) throw new Error("Devbox not found.");
-    command = buildDevboxLaunchCommand(devbox, command, input.remotePath);
   }
 
   const starterTitlePrompt = buildTitlePrompt(input.initialPrompt);
@@ -3096,72 +3099,8 @@ apiRoutes.post("/sessions", async (c) => {
 });
 
 apiRoutes.post("/sessions/:sessionId/restart", async (c) => {
-  const sessionId = c.req.param("sessionId");
-  const session = sessions.get(sessionId);
-  if (!session) return c.json({ error: "Session not found" }, 404);
-  if (session.pty) return c.json({ error: "Session already running" }, 400);
-
-  const { shell, args: shellArgs } = getSessionShellLaunch(session);
-  const cwd = existsSync(session.cwd) ? session.cwd : homedir();
-
-  let ptyProcess: pty.IPty;
-  try {
-    ptyProcess = pty.spawn(shell, shellArgs, {
-      name: "xterm-256color",
-      cwd,
-      env: getSessionPtyEnvironment(sessionId, session),
-      cols: session.terminalCols || DEFAULT_PTY_COLS,
-      rows: session.terminalRows || DEFAULT_PTY_ROWS,
-    });
-  } catch (e: any) {
-    // Probe Agent Error Log Trigger
-    logError(`[PRBE_ERROR_4hw6OQ] [session] Failed to restart PTY (shell=${shell}, cwd=${cwd}): ${e.message}`);
-    return c.json({ error: `Failed to spawn terminal: ${e.message}` }, 500);
-  }
-
-  session.pty = ptyProcess;
-  session.isRestored = false;
-  // Existing clients will receive this PTY epoch live. If none are attached,
-  // let the first future renderer reconstruct it from the bounded raw buffer.
-  session.terminalClientConnected = session.clients.size > 0;
-  session.lastOutputTime = Date.now();
-  session.cwd = cwd;
-  session.shellLaunch = { shell, args: [...shellArgs] };
-  resetTerminalLifecycle(sessionId, cwd);
-  session.agentFallbackIndex = 0;
-  session.agentAttemptCommand = undefined;
-  session.agentAttemptBlockId = undefined;
-  session.agentAttemptStartedAt = undefined;
-
-  startAgentStatusTicker(sessionId, session, sessions);
-
-  // Reset plugin status tracking for a fresh process. Everything createSession
-  // initialises has to be reset here too, or the new PTY inherits the old
-  // one's inference state.
-  session.pluginReportedStatus = false;
-  session.lastPluginStatusTime = undefined;
-  session.lastHookEvent = undefined;
-  session.claudeSessionId = undefined;
-  session.currentTool = undefined;
-  session.preToolTime = undefined;
-  session.recentOutputSize = 0;
-  applyAgentStatus(session, "running", { source: "authoritative", immediate: true });
-  session.statusChangedAt = Date.now();
-
-  attachSessionPty(sessionId, session, ptyProcess, "Restarted PTY");
-
-  const finalCommand = injectPluginDir(
-    resolveAgentLaunchCommand(session.command, session.agentId),
-    session.agentId,
-  );
-  setTimeout(() => {
-    if (session.pty === ptyProcess) installShellIntegration(sessionId, session, ptyProcess, shell);
-  }, 150);
-  setTimeout(() => {
-    if (finalCommand) startTrackedCommand(sessionId, session, ptyProcess, finalCommand);
-  }, 450);
-
-  log(`[session] Restarted ${sessionId}`);
+  const result = await relaunchSession(c.req.param("sessionId"));
+  if (!result.ok) return c.json({ error: result.error }, result.status);
   return c.json({ success: true });
 });
 

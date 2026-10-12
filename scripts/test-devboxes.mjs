@@ -157,5 +157,37 @@ check(
   "ssh 'dev' -t 'cd '\\''/tmp/it'\\''\\'\\'''\\''s here; rm -rf /'\\'' && exec claude'",
 );
 
+
+console.log("\ninstrumented launch");
+{
+  const { buildDevboxLaunch } = await import(
+    join(here, "..", "dist", "electron", "server", "services", "devboxes.js")
+  );
+  const manual = { id: "m", name: "gpu", source: "provisioned", inSshConfig: false, host: "h", user: "root", port: 2200, identityFile: "/k" };
+  const plain = buildDevboxLaunch(manual, "claude", "/w");
+  check("the first command is a bare ssh the shim can instrument", plain.launch, "ssh '-p' '2200' '-i' '/k' 'root@h'");
+  check(
+    "the remote command cds, sources the node env, fixes PATH and execs the agent with the remote plugin",
+    plain.remote,
+    "cd '/w' || exit 1; [ -f \"$HOME/.naught/env\" ] && . \"$HOME/.naught/env\"; export PATH=\"$HOME/.naught/bin:$HOME/.local/bin:$PATH\"; exec claude --plugin-dir \"$HOME/.naught/claude-code-plugin\"",
+  );
+  check("the legacy -t form is kept for the fallback", plain.legacy, "ssh '-p' '2200' '-i' '/k' 'root@h' -t 'cd '\\''/w'\\'' && exec claude'");
+  const hooked = buildDevboxLaunch(manual, "codex --model o3", undefined, { hooks: { port: 43125, sessionId: "s-1" } });
+  check(
+    "hooks export the tunnel port and the session id; codex gets no plugin dir",
+    hooked.remote,
+    "[ -f \"$HOME/.naught/env\" ] && . \"$HOME/.naught/env\"; export PATH=\"$HOME/.naught/bin:$HOME/.local/bin:$PATH\"; export OPENUI_HOST=127.0.0.1 OPENUI_PORT=43125 OPENUI_SESSION_ID='s-1'; exec codex --model o3",
+  );
+  check("no agent command opens a login shell", buildDevboxLaunch(manual, "").remote.endsWith("exec $SHELL -l"), true);
+  check("an explicit --plugin-dir is respected", buildDevboxLaunch(manual, "claude --plugin-dir /x").remote.endsWith("exec claude --plugin-dir /x"), true);
+
+  const { createRequire } = await import("module");
+  const wrapper = createRequire(import.meta.url)(join(here, "..", "resources", "remote-terminal", "openui_ssh_wrapper.cjs"));
+  check("parseAllocatedPort reads ssh's -R 0 report", wrapper.parseAllocatedPort("Warning: x\nAllocated port 43125 for remote forward to 127.0.0.1:6968\n"), 43125);
+  check("parseAllocatedPort ignores other output", wrapper.parseAllocatedPort("Permission denied (publickey)."), null);
+  check("a bare destination is instrumentable", wrapper.parseInteractiveInvocation(["dev"]).destination, "dev");
+  check("a remote command is not", wrapper.parseInteractiveInvocation(["dev", "-t", "claude"]), null);
+}
+
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed ? 1 : 0);
