@@ -325,8 +325,7 @@ export async function startServer(): Promise<number> {
           if (e instanceof TerminalClientMessageError) {
             ws.close(e.closeCode, e.message);
           } else {
-            // Probe Agent Error Log Trigger
-            if (!QUIET) console.error("[PRBE_ERROR_vbFKwR] Error processing message:", e);
+            if (!QUIET) console.error("Error processing message:", e);
             ws.close(1011, "Terminal transport failed");
           }
         }

@@ -227,11 +227,6 @@ jobs:
         run: pip install setuptools
         if: runner.os == 'Windows'
 
-      - name: Inject PRBE API key
-        run: echo '{"prbeApiKey":"'"$PRBE_API_KEY"'"}' > resources/default-config.json
-        env:
-          PRBE_API_KEY: ${{ secrets.PRBE_API_KEY }}
-
       - name: Mark release-channel build (enables auto-update by default)
         run: echo '{"channel":"release"}' > resources/build-info.json
         shell: bash

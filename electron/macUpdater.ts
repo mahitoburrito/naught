@@ -163,8 +163,7 @@ async function checkOnce(getWindow: () => BrowserWindow | null): Promise<void> {
       installOnQuit = true; // applied by installPendingUpdateOnQuit()
     }
   } catch (err: any) {
-    // Probe Agent Error Log Trigger
-    console.error("[PRBE_ERROR_mUpd8r] [updater] Mac update failed:", err?.message || err);
+    console.error("[updater] Mac update failed:", err?.message || err);
   } finally {
     checking = false;
   }
