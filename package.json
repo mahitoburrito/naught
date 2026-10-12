@@ -89,6 +89,7 @@
     },
     "files": [
       "bin/openui-control.js",
+      "bin/naught.js",
       "dist/**/*",
       "client/dist/**/*",
       "claude-code-plugin/**/*",

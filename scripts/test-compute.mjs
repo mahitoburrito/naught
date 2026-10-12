@@ -377,5 +377,72 @@ section("modal provider");
   check("the client is built once per token", events.filter((e) => e === "client:ak").length, 1);
 }
 
+
+// ─── ssh exec + bootstrap ───────────────────────────────────────────────────
+
+section("ssh exec");
+{
+  const { spawn: nodeSpawn } = await import("child_process");
+  const sshExec = await import(join(dist, "services", "compute", "sshExec.js"));
+  const box = { id: "b", name: "b", source: "provisioned", inSshConfig: false, host: "h", user: "root", port: 2222, identityFile: "/k/box" };
+  check("sshArgsFor uses the naught key and the target", sshExec.sshArgsFor(box, { identityFile: "/k/naught" }), [
+    "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-o", "StrictHostKeyChecking=accept-new",
+    "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=4",
+    "-i", "/k/naught", "-o", "IdentitiesOnly=yes", "-p", "2222", "root@h",
+  ]);
+  check("sshArgsFor falls back to the devbox identity and passes extra args", sshExec.sshArgsFor(box, { extraArgs: ["-R", "0:127.0.0.1:1"] }).slice(10), ["-i", "/k/box", "-o", "IdentitiesOnly=yes", "-R", "0:127.0.0.1:1", "-p", "2222", "root@h"]);
+  check("an ssh-config alias is passed bare", sshExec.sshArgsFor({ id: "a", name: "dev", source: "ssh-config", inSshConfig: true }).slice(10), ["dev"]);
+  let recorded = null;
+  const fakeSpawn = (cmd, args, opts) => { recorded = { cmd, args }; return nodeSpawn("sh", ["-c", "cat; printf 'boom\\n' >&2; exit 3"], opts); };
+  const result = await sshExec.runOverSsh(box, "echo hi", { input: "payload", spawn: fakeSpawn, timeoutMs: 5000 });
+  check("runOverSsh feeds stdin, collects both streams and the exit code", [result.code, result.stdout, result.stderr, result.timedOut], [3, "payload", "boom\n", false]);
+  check("runOverSsh appends the command after the target", [recorded.cmd, recorded.args.at(-1), recorded.args.at(-2)], ["ssh", "echo hi", "root@h"]);
+  const slow = await sshExec.runOverSsh(box, "x", { spawn: (c, a, o) => nodeSpawn("sh", ["-c", "sleep 5"], o), timeoutMs: 100 });
+  check("runOverSsh times out", slow.timedOut, true);
+  check("shellQuote", sshExec.shellQuote("it's"), "'it'\\''s'");
+}
+
+section("bootstrap");
+{
+  const { spawn: nodeSpawn, execFileSync } = await import("child_process");
+  const { mkdtempSync: mkTemp, readFileSync: readF, statSync: statF, writeFileSync: writeF, mkdirSync: mkdirF } = await import("fs");
+  const bootstrap = await import(join(dist, "services", "compute", "bootstrap.js"));
+  const script = bootstrap.buildBootstrapScript({ version: "v123", installAgents: true });
+  check("bootstrap script installs the agent CLIs when asked", script.includes("https://claude.ai/install.sh | bash") && script.includes("npm install -g @openai/codex"), true);
+  check("bootstrap script writes the asset version and reports", script.includes("'v123' > \"$N/assets.version\"") && script.includes("NAUGHT_BOOTSTRAP_OK"), true);
+  check("bootstrap script can skip installs", bootstrap.buildBootstrapScript({ version: "v", installAgents: false }).includes("install.sh"), false);
+  check("env file quotes values and drops bad keys", bootstrap.renderNodeEnvFile({ CLAUDE_CODE_OAUTH_TOKEN: "to'k", bad: "x", EMPTY: "" }), "export CLAUDE_CODE_OAUTH_TOKEN='to'\\''k'\n");
+  const dev = bootstrap.collectNodeAssets();
+  check("dev assets include the CLI, the manifest tool and the plugin", ["naught.js", "naught_manifest.py", "claude-code-plugin/hooks/hooks.json"].every((t) => dev.some((a) => a.target === t)), true);
+
+  const src = mkTemp(join(tmpdir(), "naught-assets-"));
+  writeF(join(src, "a.js"), "console.log(1)\n");
+  mkdirF(join(src, "plug"));
+  writeF(join(src, "plug", "x.sh"), "echo\n");
+  const assets = [{ target: "naught.js", local: join(src, "a.js") }, { target: "claude-code-plugin/x.sh", local: join(src, "plug", "x.sh") }];
+  const { tar, version } = await bootstrap.buildNodeTar({ credentials: { OPENAI_API_KEY: "sk" }, installAgents: false, assets, files: [{ target: "extra/f.txt", contents: "hi", mode: 0o644 }] });
+  check("tar version matches the asset hash", version, bootstrap.assetsVersion(assets));
+  const out = mkTemp(join(tmpdir(), "naught-unpack-"));
+  execFileSync("tar", ["-xzf", "-", "-C", out], { input: tar });
+  check("tar carries the env file, owner-only", [readF(join(out, "env"), "utf-8"), statF(join(out, "env")).mode & 0o777], ["export OPENAI_API_KEY='sk'\n", 0o600]);
+  check("tar carries the assets, the wrapper and extras", [readF(join(out, "naught.js"), "utf-8"), statF(join(out, "bin", "naught")).mode & 0o777, readF(join(out, "extra", "f.txt"), "utf-8"), statF(join(out, "bootstrap.sh")).mode & 0o777], ["console.log(1)\n", 0o755, "hi", 0o700]);
+  check("the shipped plugin file keeps its path", readF(join(out, "claude-code-plugin", "x.sh"), "utf-8"), "echo\n");
+
+  // Run the real bootstrap script locally with HOME pointed at a scratch dir.
+  const home = mkTemp(join(tmpdir(), "naught-home-"));
+  const local = execFileSync("sh", ["-c", bootstrap.REMOTE_UNPACK_COMMAND], { input: tar, env: { ...process.env, HOME: home }, encoding: "utf-8" });
+  check("the unpack command runs the script and reports versions", local.trim().startsWith("NAUGHT_BOOTSTRAP_OK {"), true);
+  check("the node records the asset version", readF(join(home, ".naught", "assets.version"), "utf-8").trim(), version);
+  const parsed = bootstrap.parseBootstrapOutput({ code: 0, signal: null, stdout: local, stderr: "NAUGHT_WARN codex install failed\n", timedOut: false }, version);
+  check("parseBootstrapOutput reads versions and warnings", [parsed.ok, typeof parsed.versions.python3, parsed.warnings], [true, "string", ["codex install failed"]]);
+  check("parseBootstrapOutput on failure keeps the first real error", bootstrap.parseBootstrapOutput({ code: 1, signal: null, stdout: "", stderr: "NAUGHT_WARN x\ntar: broken\n", timedOut: false }, version), { ok: false, warnings: ["x"], assetVersion: version, error: "tar: broken" });
+  check("parseBootstrapOutput on timeout", bootstrap.parseBootstrapOutput({ code: null, signal: "SIGKILL", stdout: "", stderr: "", timedOut: true }, version).error, "bootstrap timed out");
+
+  const box = { id: "b", name: "b", source: "provisioned", inSshConfig: false, host: "h", user: "ubuntu", port: 22, identityFile: "/k" };
+  const matching = await bootstrap.ensureNodeAssets(box, { spawn: (c, a, o) => nodeSpawn("sh", ["-c", `printf '%s\\n' '${bootstrap.assetsVersion()}'`], o) });
+  check("ensureNodeAssets skips shipping when the version matches", matching, { ok: true, shipped: false });
+  check("nodeHomeOf", [bootstrap.nodeHomeOf(box), bootstrap.nodeHomeOf({ ...box, user: "root" })], ["/home/ubuntu", "/root"]);
+}
+
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed ? 1 : 0);
