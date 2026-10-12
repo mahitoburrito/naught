@@ -444,5 +444,161 @@ section("bootstrap");
   check("nodeHomeOf", [bootstrap.nodeHomeOf(box), bootstrap.nodeHomeOf({ ...box, user: "root" })], ["/home/ubuntu", "/root"]);
 }
 
+
+// ─── orchestrator ───────────────────────────────────────────────────────────
+
+section("node orchestrator");
+{
+  const nodes = await import(join(dist, "services", "compute", "nodes.js"));
+  const H = 3_600_000;
+  let now = 1_000_000;
+  const mails = [];
+  const events = [];
+  const fakeSessions = new Map();
+  const fake = {
+    id: "modal",
+    failProvision: false,
+    failWait: false,
+    providerStatus: "ready",
+    async configured() { return { ok: true, source: "naught" }; },
+    async test() { return { ok: true, message: "x" }; },
+    async offers() { return []; },
+    estimateHourlyUsd(spec) { return spec.gpu === "H100" ? 3.95 : 0.5; },
+    async provision(spec, publicKey) { events.push(["provision", spec.name, publicKey.startsWith("ssh-ed25519 ")]); if (this.failProvision) throw new Error("quota exceeded"); return { instanceId: "sb-1" }; },
+    async waitReady(id) { events.push(["waitReady", id]); if (this.failWait) throw new Error("boot failed"); return { host: "1.1.1.1", port: 2200, user: "root" }; },
+    async status() { return this.providerStatus; },
+    async terminate(id) { events.push(["terminate", id]); },
+  };
+  nodes.configureNodes({
+    providers: () => ({ modal: fake }),
+    now: () => now,
+    mailer: async (input) => { mails.push([input.kind, input.n, input.node.name]); return { sent: true }; },
+    bootstrap: async (box, payload) => { events.push(["bootstrap", box.host, payload.installAgents, Object.keys(payload.credentials || {})]); return { ok: true, versions: { claude: "2.0" }, warnings: [], assetVersion: "v" }; },
+    sessions: () => fakeSessions,
+    waitReadyTimeoutMs: 2000,
+  });
+  const reset = () => { mails.length = 0; events.length = 0; fakeSessions.clear(); fake.failProvision = false; fake.failWait = false; fake.providerStatus = "ready"; };
+
+  await withLaunchCwd(async () => {
+    reset();
+    nodes.saveComputeConfig({ policy: { maxConcurrentNodes: 1 }, notifications: { to: "me@prbe.ai" } });
+    const { node, pending, reasons } = await nodes.requestNode({ provider: "modal", gpu: "H100", name: "gpu-a" }, { kind: "session", sessionId: "s1" });
+    check("inside policy starts provisioning at once", [node.provision.status, pending, reasons], ["provisioning", false, []]);
+    const ready = await nodes.waitForNode(node.id, 3000);
+    check("the node becomes ready with the endpoint and the naught key", [ready.provision.status, ready.host, ready.port, ready.user, ready.identityFile.endsWith("naught_ed25519"), ready.defaultPath], ["ready", "1.1.1.1", 2200, "root", true, "/root"]);
+    check("billing start and bootstrap versions are recorded", [ready.provision.startedAt, ready.provision.readyAt, ready.provision.versions, ready.provision.hourlyUsd], [now, now, { claude: "2.0" }, 3.95]);
+    check("provision → waitReady → bootstrap, modal skips agent installs", events.map((e) => e[0]), ["provision", "waitReady", "bootstrap"]);
+    check("bootstrap targets the endpoint without installs", events[2].slice(1, 3), ["1.1.1.1", false]);
+    check("the started email went out once", mails, [["started", undefined, "gpu-a"]]);
+    check("live nodes and hourly total", [nodes.liveNodes().length, nodes.liveHourlyUsd()], [1, 3.95]);
+
+    const second = await nodes.requestNode({ provider: "modal", gpu: "T4", name: "gpu-b" }, { kind: "user" });
+    check("over the concurrency cap parks the request", [second.pending, second.node.provision.status, second.reasons], [true, "pending", ["Already 1 of 1 nodes live"]]);
+    check("pending nodes are listed", nodes.pendingNodes().map((n) => n.name), ["gpu-b"]);
+    const denied = await nodes.denyNode(second.node.id);
+    check("deny terminates without mail", [denied.provision.status, denied.provision.terminateReason, mails.length], ["terminated", "user", 1]);
+
+    const third = await nodes.requestNode({ provider: "modal", gpu: "T4", name: "gpu-c" }, { kind: "user" });
+    await nodes.approveNode(third.node.id);
+    const approved = await nodes.waitForNode(third.node.id, 3000);
+    check("approve runs the pipeline", [approved.provision.status, approved.provision.reasons], ["ready", undefined]);
+
+    // Terminate is idempotent and mails once.
+    const before = events.length;
+    const gone = await nodes.terminateNode(node.id, "user");
+    check("terminate goes through the provider and records the reason", [gone.provision.status, gone.provision.terminateReason, events.slice(before).map((e) => e[0])], ["terminated", "user", ["terminate"]]);
+    check("terminated mail", mails.at(-1), ["terminated", undefined, "gpu-a"]);
+    await nodes.terminateNode(node.id, "user");
+    check("a second terminate is a no-op", [events.length - before, mails.length], [1, 3]);
+  });
+
+  await withLaunchCwd(async () => {
+    reset();
+    nodes.saveComputeConfig({ policy: { maxHourlyUsd: 1 }, notifications: { to: "me@prbe.ai" } });
+    const pricey = await nodes.requestNode({ provider: "modal", gpu: "H100" }, { kind: "user" });
+    check("over the hourly cap is parked with the reason", [pricey.pending, pricey.reasons], [true, ["Estimated $3.95/hr exceeds the $1.00/hr cap"]]);
+    check("a generated name carries provider and gpu", /^modal-h100-[a-f0-9]{6}$/.test(pricey.node.name), true);
+
+    fake.failProvision = true;
+    const failed = await nodes.requestNode({ provider: "modal", name: "boom" }, { kind: "user" });
+    const errored = await nodes.waitForNode(failed.node.id, 3000);
+    check("a provider failure before billing is an error card, no terminate, no mail", [errored.provision.status, errored.provision.error, events.some((e) => e[0] === "terminate"), mails.length], ["error", "quota exceeded", false, 0]);
+    check("an error card is not live", nodes.liveNodes().length, 0);
+
+    reset();
+    fake.failWait = true;
+    const stuck = await nodes.requestNode({ provider: "modal", name: "stuck" }, { kind: "user" });
+    const stuckDone = await nodes.waitForNode(stuck.node.id, 3000);
+    check("a failure while waiting terminates the instance", [stuckDone.provision.status, events.some((e) => e[0] === "terminate" && e[1] === "sb-1"), mails.length], ["error", true, 0]);
+  });
+
+  await withLaunchCwd(async () => {
+    reset();
+    now = 10 * H;
+    nodes.saveComputeConfig({ policy: { maxLifetimeHours: 48 }, notifications: { to: "me@prbe.ai" } });
+    const { node } = await nodes.requestNode({ provider: "modal", gpu: "H100", name: "tick-a" }, { kind: "user" });
+    await nodes.waitForNode(node.id, 3000);
+    // A session that is always active keeps the idle alert out of this scenario.
+    fakeSessions.set("busy", { devboxId: node.id, agentName: "Busy", get lastOutputTime() { return now; }, lastInputTime: 0 });
+    mails.length = 0;
+    await nodes.tick();
+    check("a fresh node gets no mail on the first tick", mails, []);
+    now += 4 * H + 60_000;
+    await nodes.tick();
+    check("reminder after 4 h", mails, [["reminder", 1, "tick-a"]]);
+    await nodes.tick();
+    check("no duplicate reminder in the same window", mails.length, 1);
+    now += 4 * H;
+    await nodes.tick();
+    check("second reminder after 8 h", mails.at(-1), ["reminder", 2, "tick-a"]);
+    now += 40 * H;
+    await nodes.tick();
+    check("max lifetime terminates", [nodes.getNode(node.id).provision.status, nodes.getNode(node.id).provision.terminateReason, events.at(-1)], ["terminated", "max-lifetime", ["terminate", "sb-1"]]);
+    check("terminated mail after the cap", mails.at(-1), ["terminated", undefined, "tick-a"]);
+  });
+
+  await withLaunchCwd(async () => {
+    reset();
+    now = 20 * H;
+    nodes.saveComputeConfig({ policy: { maxLifetimeHours: 48 }, notifications: { to: "me@prbe.ai" } });
+    const { node } = await nodes.requestNode({ provider: "modal", gpu: "H100", name: "idle-a" }, { kind: "user" });
+    await nodes.waitForNode(node.id, 3000);
+    mails.length = 0;
+    now += 61 * 60_000;
+    await nodes.tick();
+    check("idle alert after an hour without activity", mails, [["idle", 1, "idle-a"]]);
+    await nodes.tick();
+    check("idle alert does not repeat within the window", mails.length, 1);
+    now += 61 * 60_000;
+    await nodes.tick();
+    check("idle alert repeats after another idle hour", mails.at(-1), ["idle", 2, "idle-a"]);
+    fakeSessions.set("s9", { devboxId: node.id, agentName: "Claude", lastOutputTime: now, lastInputTime: 0 });
+    now += 30 * 60_000;
+    await nodes.tick();
+    check("an attached session's output counts as activity", [nodes.getNode(node.id).provision.lastActivityAt, mails.length], [now - 30 * 60_000, 2]);
+    check("attached sessions are listed by name", nodes.attachedSessions(node.id).map((s) => s.name), ["Claude"]);
+    fake.providerStatus = "terminated";
+    await nodes.tick();
+    check("a node gone on the provider side is marked terminated", [nodes.getNode(node.id).provision.status, nodes.getNode(node.id).provision.terminateReason, mails.at(-1)], ["terminated", "provider", ["terminated", undefined, "idle-a"]]);
+  });
+
+  await withLaunchCwd(async () => {
+    reset();
+    nodes.saveComputeConfig({ notifications: { to: "me@prbe.ai" } });
+    const { node } = await nodes.requestNode({ provider: "modal", name: "resume-a" }, { kind: "user" });
+    await nodes.waitForNode(node.id, 3000);
+    // Simulate a restart mid-provision: rewrite the record as provisioning with an instance id.
+    const devboxes = await import(join(dist, "services", "devboxes.js"));
+    devboxes.upsertProvisionedDevbox({ ...nodes.getNode(node.id), provision: { ...nodes.getNode(node.id).provision, status: "provisioning", readyAt: undefined } });
+    devboxes.upsertProvisionedDevbox({ ...nodes.getNode(node.id), id: "node-lost", name: "lost", provision: { ...nodes.getNode(node.id).provision, status: "provisioning", instanceId: "" } });
+    events.length = 0;
+    await nodes.reconcileNodes();
+    const resumed = await nodes.waitForNode(node.id, 3000);
+    check("reconcile resumes an in-flight node", [resumed.provision.status, events.map((e) => e[0])], ["ready", ["waitReady", "bootstrap"]]);
+    check("reconcile fails a node the provider never answered for", nodes.getNode("node-lost").provision.status, "error");
+  });
+  nodes.stopNodeTicker();
+}
+
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed ? 1 : 0);

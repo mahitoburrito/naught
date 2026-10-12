@@ -26,6 +26,7 @@ export function discoverHosts(): DiscoveredHost[] {
 
 function normalise(input: Partial<DevboxConfig>): Omit<DevboxConfig, "id"> {
   const source: DevboxConfig["source"] = input.source === "ssh-config" ? "ssh-config" : "manual";
+  // "provisioned" never comes through here: see upsertProvisionedDevbox.
   const port = Number.isInteger(input.port) && input.port! > 0 && input.port! <= 65535
     ? input.port
     : undefined;
@@ -73,6 +74,29 @@ export function deleteDevbox(id: string): void {
 
 export function getDevbox(id: string): DevboxConfig | null {
   return listDevboxes().find((box) => box.id === id) || null;
+}
+
+/**
+ * Provisioned boxes bypass `normalise`: their connection details come from a
+ * provider, and the provision record rides along. Insert or replace by id.
+ */
+export function upsertProvisionedDevbox(devbox: DevboxConfig): DevboxConfig {
+  const config = loadConfig();
+  const list = config.devboxes || [];
+  const index = list.findIndex((box) => box.id === devbox.id);
+  const stored: DevboxConfig = { ...devbox, source: "provisioned", inSshConfig: false };
+  if (index === -1) list.push(stored);
+  else list[index] = stored;
+  config.devboxes = list;
+  saveConfig(config);
+  return stored;
+}
+
+export function listProvisionedDevboxes(): Array<DevboxConfig & { provision: NonNullable<DevboxConfig["provision"]> }> {
+  return listDevboxes().filter(
+    (box): box is DevboxConfig & { provision: NonNullable<DevboxConfig["provision"]> } =>
+      box.source === "provisioned" && !!box.provision,
+  );
 }
 
 /**
