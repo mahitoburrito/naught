@@ -10,6 +10,8 @@ import { prbeRoutes } from "./routes/prbe";
 import { coordinatorRoutes } from "./routes/coordinator";
 import { devboxRoutes } from "./routes/devboxes";
 import { computeRoutes } from "./routes/compute";
+import { moveRoutes } from "./routes/move";
+import { resumeInFlightMoves } from "./services/sessionMove";
 import { reconcileNodes, startNodeTicker } from "./services/compute/nodes";
 import {
   sessions,
@@ -74,6 +76,7 @@ app.route("/api/prbe", prbeRoutes);
 app.route("/api/coordinator", coordinatorRoutes);
 app.route("/api/devboxes", devboxRoutes);
 app.route("/api/compute", computeRoutes);
+app.route("/api/sessions", moveRoutes);
 
 // Serve static files from client/dist in standalone (non-Electron) mode
 const CLIENT_DIST = join(__dirname, "..", "..", "..", "client", "dist");
@@ -136,6 +139,7 @@ export async function startServer(): Promise<number> {
   await restoreSessions();
   startCoordinatorRuntime();
   startNodeTicker();
+  resumeInFlightMoves();
   reconcileNodes().catch((error) => {
     if (!QUIET) console.warn("[compute] reconcile failed:", error?.message || error);
   });

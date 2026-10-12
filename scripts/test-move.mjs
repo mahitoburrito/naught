@@ -4,7 +4,7 @@
 // server (`npm run build:electron` first). Never touches the network.
 
 import { execFileSync, spawn as nodeSpawn } from "child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, statSync, symlinkSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { dirname, join } from "path";
 import { fileURLToPath } from "url";
@@ -194,6 +194,164 @@ section("transfer");
   let error = "";
   try { await transfer.pushFiles(box, ["/definitely/missing/file"], { spawn: fakeSpawn, remoteRoot: remote }); } catch (e) { error = e.message; }
   check("a missing source file fails the push", error.startsWith("local tar exited"), true);
+}
+
+
+// ─── state machine ──────────────────────────────────────────────────────────
+
+section("move state machine");
+{
+  const launchDir = temp("naught-launch-");
+  const previousLaunch = process.env.LAUNCH_CWD;
+  process.env.LAUNCH_CWD = launchDir;
+  const move = await import(join(dist, "services", "sessionMove.js"));
+  const manifestMod = await import(join(dist, "services", "move", "manifest.js"));
+  const devboxes = await import(join(dist, "services", "devboxes.js"));
+  const secrets = await import(join(dist, "services", "secrets.js"));
+  const { Hono } = await import("hono");
+  const { moveRoutes } = await import(join(dist, "routes", "move.js"));
+  const app = new Hono().route("/api/sessions", moveRoutes);
+  const call = async (method, path, body) => {
+    const res = await app.request(`http://local${path}`, { method, headers: body ? { "Content-Type": "application/json" } : {}, body: body ? JSON.stringify(body) : undefined });
+    return { status: res.status, body: await res.json().catch(() => null) };
+  };
+
+  secrets.updateEnvValue("CLAUDE_CODE_OAUTH_TOKEN", "oat-x");
+  const node = devboxes.upsertProvisionedDevbox({
+    id: "node-1", name: "gpu-1", source: "provisioned", inSshConfig: false, host: "h", user: "root", port: 22, identityFile: "/k", defaultPath: "/root",
+    provision: { provider: "modal", instanceId: "sb", gpuCount: 0, cpu: 2, memoryGb: 8, status: "ready", requestedBy: { kind: "user" }, requestedAt: 0, startedAt: 0, hourlyUsd: 0.5, maxLifetimeHours: 8, lastActivityAt: 0, emails: { reminderCount: 0, idleAlertCount: 0 } },
+  });
+
+  const home = temp("naught-mhome-");
+  const repo = makeRepo();
+  const projectDir = join(home, ".claude", "projects", repo.replace(/[^A-Za-z0-9]/g, "-"));
+  mkdirSync(projectDir, { recursive: true });
+  writeFileSync(join(projectDir, "cid-1.jsonl"), '{"type":"x"}\n');
+  mkdirSync(join(home, ".claude", "todos"), { recursive: true });
+  writeFileSync(join(home, ".claude", "todos", "cid-1-agent.json"), "[]");
+
+  const makePty = () => ({ killed: false, kill() { this.killed = true; } });
+  const sessions = new Map();
+  const session = {
+    pty: makePty(), agentId: "claude", agentName: "Claude Code", command: "claude", cwd: repo, createdAt: new Date(0).toISOString(),
+    status: "idle", claudeSessionId: "cid-1", outputBuffer: [], outputBufferChars: 0, clients: new Set(), nodeId: "n1", terminalBlocks: [],
+    terminalCols: 80, terminalRows: 24, terminalFrameRedrawsInPlace: true, lastOutputTime: 0, lastInputTime: 0, recentOutputSize: 0,
+  };
+  sessions.set("s1", session);
+
+  const calls = [];
+  const states = [];
+  let remoteManifest = null;
+  let now = 1_000_000;
+  let pushFailures = 0;
+  let relaunched = [];
+  move.configureMoves({
+    sessions: () => sessions,
+    now: () => (now += 10),
+    localHome: () => home,
+    buildRemoteManifest: async (devbox, roots, includeIgnored) => remoteManifest ?? manifestMod.parseManifestOutput("", manifestMod.manifestRoots(roots)),
+    runRemote: async (devbox, command) => {
+      calls.push(["run", command.slice(0, 40)]);
+      if (command.includes('"$HOME"')) return { code: 0, signal: null, stdout: "/root", stderr: "", timedOut: false };
+      if (command.startsWith("stat ")) return { code: 0, signal: null, stdout: String(statSync(join(projectDir, "cid-1.jsonl")).size), stderr: "", timedOut: false };
+      return { code: 0, signal: null, stdout: "", stderr: "", timedOut: false };
+    },
+    transfer: {
+      push: async (devbox, paths, opts) => {
+        calls.push(["push", paths.map((p) => p.replace(home, "~").replace(repo, "<repo>")).sort(), opts?.memberBase === home ? "home" : "mirror"]);
+        if (pushFailures > 0) { pushFailures--; throw new Error("network blip"); }
+        if (!opts) remoteManifest = await manifestMod.buildLocalManifest(manifestMod.resolveMoveRoots(repo), false);
+      },
+      pull: async (devbox, paths, opts) => { calls.push(["pull", paths.map((p) => p.replace("/root", "~").replace(repo, "<repo>")).sort(), opts?.memberBase === "/root" ? "home" : "mirror"]); },
+      deleteRemote: async (devbox, paths) => { calls.push(["deleteRemote", paths.length]); },
+      deleteLocal: (paths) => { calls.push(["deleteLocal", paths.length]); },
+      ensureRemoteDirectory: async (devbox, path) => { calls.push(["mkdir", path.replace(repo, "<repo>")]); },
+    },
+    ensureNodeAssets: async () => ({ ok: true, shipped: false }),
+    relaunch: async (sessionId, overrides) => {
+      relaunched.push(overrides);
+      const s = sessions.get(sessionId);
+      s.pty = makePty();
+      s.status = "running";
+      if (overrides.devboxId !== undefined) s.devboxId = overrides.devboxId || undefined;
+      if (overrides.cwd) s.cwd = overrides.cwd;
+      setTimeout(() => { s.claudeSessionId = "cid-1"; s.status = "idle"; }, 30);
+      return { ok: true };
+    },
+    write: (sessionId, data) => { calls.push(["write", data]); const s = sessions.get(sessionId); setTimeout(() => { s.pty = null; s.status = "disconnected"; }, 20); },
+    terminalPhase: () => "at_prompt",
+    persist: () => { if (session.move && states.at(-1) !== `${session.move.direction}:${session.move.state}`) states.push(`${session.move.direction}:${session.move.state}`); },
+    terminateNode: async (nodeId, reason) => { calls.push(["terminateNode", nodeId, reason]); },
+    timing: { pollMs: 5, idleTimeoutMs: 2000, quiesceMs: 500, verifyMs: 800 },
+  });
+  const settled = async () => { for (let i = 0; i < 400; i++) { if (["done", "error"].includes(session.move?.state)) return session.move; await new Promise((r) => setTimeout(r, 10)); } return session.move; };
+
+  const plan = await move.planMoveOut("s1", { nodeId: "node-1" });
+  check("plan: ok with the claude session found and a manifest", [plan.ok, plan.harness.kind, plan.harness.sessionId, plan.harness.found, plan.manifest.files, plan.credential, plan.agentState, plan.destination], [true, "claude", "cid-1", true, 3, "CLAUDE_CODE_OAUTH_TOKEN", "idle", { id: "node-1", name: "gpu-1" }]);
+  check("plan: ignored files are offered with their extra size", plan.includeIgnoredExtraBytes, 9);
+  check("plan refuses a missing node", (await move.planMoveOut("s1", { nodeId: "nope", manifest: false })).refusals, ["Destination node not found."]);
+  secrets.updateEnvValue("CLAUDE_CODE_OAUTH_TOKEN", "");
+  check("plan refuses without a node credential", (await move.planMoveOut("s1", { nodeId: "node-1", manifest: false })).refusals[0].startsWith("Claude needs CLAUDE_CODE_OAUTH_TOKEN"), true);
+  secrets.updateEnvValue("CLAUDE_CODE_OAUTH_TOKEN", "oat-x");
+
+  const started = await call("POST", "/api/sessions/s1/move", { nodeId: "node-1", afterTurn: true });
+  check("POST move is accepted", [started.status, started.body.accepted, started.body.nodeId], [202, true, "node-1"]);
+  let result = await settled();
+  check("the move runs every step to done", states, ["out:waiting-idle", "out:prepare", "out:quiesce", "out:sync-files", "out:sync-agent", "out:relaunch", "out:verify", "out:done"]);
+  check("quiesce typed the harness exit command", calls.find((c) => c[0] === "write"), ["write", "/exit"]);
+  check("files were pushed by absolute path, then the agent state under the node home", calls.filter((c) => c[0] === "push").map((c) => [c[1].length, c[2]]), [[3, "mirror"], [2, "home"]]);
+  check("agent state covers the transcript and todos", calls.filter((c) => c[0] === "push")[1][1], ["~/.claude/projects/" + repo.replace(/[^A-Za-z0-9]/g, "-") + "/cid-1.jsonl", "~/.claude/todos/cid-1-agent.json"]);
+  check("relaunch used the resume command on the node at the same path", relaunched[0], { command: "claude --resume cid-1", devboxId: "node-1", remotePath: repo });
+  check("done records the manifest and history", [result.state, result.manifest.files, result.history.length, result.history[0].direction, session.devboxId], ["done", 3, 1, "out", "node-1"]);
+  check("GET move", (await call("GET", "/api/sessions/s1/move")).body.move.state, "done");
+  check("a second move out is refused while remote", (await call("POST", "/api/sessions/s1/move", { nodeId: "node-1" })).status, 400);
+
+  // Bring back with no local changes: straight sync, node terminated afterwards.
+  calls.length = 0; states.length = 0; relaunched = [];
+  const homePlan = await call("POST", "/api/sessions/s1/move/home/plan");
+  check("bring-back plan with an untouched local tree has no conflicts", [homePlan.body.ok, homePlan.body.conflicts], [true, []]);
+  const back = await call("POST", "/api/sessions/s1/move/home", { terminateNode: true });
+  check("POST home is accepted", back.status, 202);
+  result = await settled();
+  check("bring-back has no error", result.error, undefined);
+  check("bring-back walks the steps", states, ["home:waiting-idle", "home:prepare", "home:quiesce", "home:sync-files", "home:sync-agent", "home:relaunch", "home:verify", "home:done"]);
+  check("nothing to pull when trees match; the transcript comes home; the node is terminated", [calls.filter((c) => c[0] === "pull").map((c) => [c[1].length, c[2]]), calls.some((c) => c[0] === "terminateNode" && c[2] === "bring-back")], [[[0, "mirror"], [1, "home"]], true]);
+  check("relaunch is local again", [relaunched[0].devboxId, relaunched[0].cwd, session.devboxId], [null, repo, undefined]);
+  check("history has both legs", result.history.map((h) => h.direction), ["out", "home"]);
+
+  // Failure + retry: the push fails once, the session stays local, retry finishes.
+  calls.length = 0; states.length = 0; relaunched = []; pushFailures = 1; remoteManifest = null;
+  session.pty = makePty(); session.status = "idle";
+  await move.startMove("s1", { nodeId: "node-1", whenIdle: false });
+  result = await settled();
+  check("a failed step parks the move with the error and the step", [result.state, result.failedStep, result.error, session.devboxId, relaunched.length], ["error", "sync-files", "network blip", undefined, 0]);
+  check("local files are untouched by the failure", readFileSync(join(repo, "tracked.txt"), "utf-8"), "tracked\n");
+  await call("POST", "/api/sessions/s1/move/retry");
+  result = await settled();
+  check("retry resumes at the failed step and completes", [result.state, states.slice(-5)], ["done", ["out:sync-files", "out:sync-agent", "out:relaunch", "out:verify", "out:done"]]);
+
+  // Conflict on bring-back: a local edit after the move needs a choice.
+  writeFileSync(join(repo, "tracked.txt"), "edited locally\n");
+  const conflictPlan = await call("POST", "/api/sessions/s1/move/home/plan");
+  check("a changed local tree reports the conflicting files", conflictPlan.body.conflicts, [join(repo, "tracked.txt")]);
+  const refused = await call("POST", "/api/sessions/s1/move/home", {});
+  check("bring-back without a choice is 409", [refused.status, refused.body.refusals], [409, [join(repo, "tracked.txt")]]);
+  calls.length = 0; states.length = 0;
+  // Overwrite: the pull fake restores the node's version.
+  move.configureMoves({ transfer: { pull: async (devbox, paths) => { calls.push(["pull", paths.length]); for (const p of paths) if (p.endsWith("tracked.txt")) writeFileSync(p, "tracked\n"); } } });
+  const overwrite = await call("POST", "/api/sessions/s1/move/home", { conflict: "overwrite", terminateNode: false });
+  result = await settled();
+  check("overwrite pulls the differing file and finishes", [overwrite.status, result.state, calls.filter((c) => c[0] === "pull")[0], readFileSync(join(repo, "tracked.txt"), "utf-8")], [202, "done", ["pull", 1], "tracked\n"]);
+  check("terminateNode false keeps the node", calls.some((c) => c[0] === "terminateNode"), false);
+
+  // Restart recovery.
+  session.move = { ...session.move, state: "sync-files", direction: "out" };
+  move.resumeInFlightMoves();
+  check("a restart mid-transfer parks the move as an error", [session.move.state, session.move.failedStep], ["error", "sync-files"]);
+  check("cancel after an error keeps the last completed leg", (await call("POST", "/api/sessions/s1/move/cancel")).body.move.state, "done");
+  check("unknown session is 404", (await call("GET", "/api/sessions/nope/move")).status, 404);
+
+  if (previousLaunch === undefined) delete process.env.LAUNCH_CWD; else process.env.LAUNCH_CWD = previousLaunch;
 }
 
 console.log(`\n${passed} passed, ${failed} failed`);

@@ -16,6 +16,11 @@ export interface TransferDeps {
   /** Where absolute paths land on the far side; tests point it at a scratch dir. */
   remoteRoot?: string;
   localRoot?: string;
+  /**
+   * Prefix stripped from each path to form the tar member name. "/" mirrors
+   * absolute paths; a home directory re-roots files under another home.
+   */
+  memberBase?: string;
   run?: (command: string, options?: { input?: Buffer | string; timeoutMs?: number }) => Promise<SshRunResult>;
 }
 
@@ -30,8 +35,8 @@ function stripRoot(path: string, root: string): string {
  * paths without their leading slash; `-C <root>` on either side decides where
  * that tree lives (`/` in production, a scratch directory in tests).
  */
-export function tarMemberList(paths: string[]): Buffer {
-  return Buffer.from(paths.map((path) => stripRoot(path, "/")).join("\0") + (paths.length ? "\0" : ""), "utf-8");
+export function tarMemberList(paths: string[], base = "/"): Buffer {
+  return Buffer.from(paths.map((path) => stripRoot(path, base)).join("\0") + (paths.length ? "\0" : ""), "utf-8");
 }
 
 export function localTarCreateArgs(root = "/"): string[] {
@@ -85,7 +90,7 @@ export async function pushFiles(devbox: DevboxConfig, paths: string[], deps: Tra
   tar.stdout!.pipe(ssh.stdin!);
   tar.stdin!.on("error", () => { /* tar closed early; its exit code tells the story */ });
   ssh.stdin!.on("error", () => { /* ssh closed early; its exit code tells the story */ });
-  tar.stdin!.end(tarMemberList(paths));
+  tar.stdin!.end(tarMemberList(paths, deps.memberBase ?? "/"));
   const [tarResult, sshResult] = await Promise.all([waitFor(tar, "tar"), waitFor(ssh, "ssh")]);
   if (tarResult.code !== 0) throw failed("local tar", tarResult);
   if (sshResult.code !== 0) throw failed("remote extract", sshResult);
@@ -104,7 +109,7 @@ export async function pullFiles(devbox: DevboxConfig, paths: string[], deps: Tra
   ssh.stdout!.pipe(tar.stdin!);
   ssh.stdin!.on("error", () => { /* see pushFiles */ });
   tar.stdin!.on("error", () => { /* see pushFiles */ });
-  ssh.stdin!.end(tarMemberList(paths));
+  ssh.stdin!.end(tarMemberList(paths, deps.memberBase ?? "/"));
   const [sshResult, tarResult] = await Promise.all([waitFor(ssh, "ssh"), waitFor(tar, "tar")]);
   if (sshResult.code !== 0) throw failed("remote tar", sshResult);
   if (tarResult.code !== 0) throw failed("local extract", tarResult);
