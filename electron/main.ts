@@ -4,6 +4,7 @@ import { existsSync, readFileSync } from "fs";
 import { startServer } from "../server/index";
 import { getActiveSessionCount } from "../server/services/sessionManager";
 import { autoUpdater } from "electron-updater";
+import { initCoordinatorAgent, cleanupCoordinatorAgent } from "./coordinatorAgentIpc";
 import { destroyBrowserView, registerBrowserViewIpc } from "./browserView";
 import { startMacAutoUpdater, installPendingUpdateOnQuit } from "./macUpdater";
 import { safeWebNavigationUrl } from "./externalNavigation";
@@ -133,6 +134,9 @@ app.whenReady().then(async () => {
 
   createWindow();
 
+  // The Claude-backed workspace coordinator talks to the embedded server
+  initCoordinatorAgent(mainWindow!, serverPort);
+
   if (autoUpdateEnabled && process.platform === "darwin") {
     // electron-updater can't install into an unsigned mac app — use our
     // custom zip-swap updater instead (electron/macUpdater.ts).
@@ -186,6 +190,7 @@ app.on("will-quit", () => {
   destroyBrowserView();
   destroyClipboardIpc();
   destroyNativeDialogIpc();
+  cleanupCoordinatorAgent();
   installPendingUpdateOnQuit();
   process.emit("SIGINT" as any);
 });
