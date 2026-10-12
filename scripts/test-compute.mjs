@@ -248,5 +248,73 @@ section("notifications");
   check("a rejected send surfaces Resend's answer", message, "Resend 422: domain not verified");
 }
 
+
+// ─── Thunder provider ───────────────────────────────────────────────────────
+
+section("thunder provider");
+{
+  const thunder = await import(join(dist, "services", "compute", "thunder.js"));
+  const okJson = (body, status = 200) => ({ ok: status < 400, status, statusText: "x", text: async () => JSON.stringify(body) });
+  const calls = [];
+  let listResponses = [];
+  const fetchStub = async (url, init = {}) => {
+    const path = url.replace(thunder.THUNDER_BASE_URL, "");
+    calls.push({ path, method: init.method || "GET", body: init.body ? JSON.parse(init.body) : undefined, auth: init.headers?.Authorization });
+    if (path === "/instances/list") return okJson(listResponses.length > 1 ? listResponses.shift() : listResponses[0] ?? {});
+    if (path === "/instances/create") return okJson({ uuid: "uuid-1", identifier: 41, key: "secret" }, 201);
+    if (path === "/v2/specs") return okJson({ specs: { h100: { displayName: "H100", gpuCount: 1, vcpuOptions: [4, 8], ramPerVCPUGiB: 4, vramGB: 80, storageGB: { min: 100, max: 1000 } }, t4: { displayName: "T4", gpuCount: 1, vcpuOptions: [4], ramPerVCPUGiB: 4, vramGB: 16, storageGB: { min: 50, max: 500 } } } });
+    if (path === "/v2/pricing") return okJson({ pricing: { h100: 1.47 } });
+    if (path === "/thunder-templates") return okJson({ "ubuntu-22.04": { displayName: "Ubuntu" }, comfy: { displayName: "ComfyUI" } });
+    if (path.startsWith("/instances/") && init.method === "DELETE") return okJson({ ok: true });
+    return okJson({ error: "nope" }, 404);
+  };
+  const unconfigured = new thunder.ThunderProvider({ fetch: fetchStub, env: {}, file: {} });
+  check("unconfigured without a token", (await unconfigured.configured()).ok, false);
+  const provider = new thunder.ThunderProvider({ fetch: fetchStub, env: {}, file: { TNR_API_TOKEN: "tok" }, pollMs: 1, tcpProbe: async () => true });
+  check("configured from Naught's file", await provider.configured(), { ok: true, source: "naught" });
+  check("env source is reported", await new thunder.ThunderProvider({ fetch: fetchStub, env: { TNR_API_TOKEN: "e" }, file: {} }).configured(), { ok: true, source: "env" });
+
+  listResponses = [{ "41": { uuid: "uuid-1", status: "running", ip: "1.2.3.4", port: 2222 } }];
+  check("test lists instances with the bearer token", await provider.test(), { ok: true, message: "Connected · 1 instance" });
+  check("bearer header", calls.at(-1).auth, "Bearer tok");
+
+  const offers = await provider.offers();
+  check("offers join specs, pricing and templates", offers.map((o) => [o.gpu, o.cpu, o.memoryGb, o.diskGb, o.hourlyUsd, o.image, o.label]), [
+    ["h100", 4, 16, 100, 1.47, "ubuntu-22.04", "H100 · 4 vCPU · 16 GB"],
+    ["h100", 8, 32, 100, 1.47, "ubuntu-22.04", "H100 · 8 vCPU · 32 GB"],
+    ["t4", 4, 16, 50, 0, "ubuntu-22.04", "T4 · 4 vCPU · 16 GB · price unknown"],
+  ]);
+  check("offers are cached", (await provider.offers()) === offers, true);
+  check("estimate from cached offers", provider.estimateHourlyUsd({ provider: "thunder", gpu: "H100", gpuCount: 2, cpu: 8, memoryGb: 32, name: "n", maxLifetimeHours: 8 }), 2.94);
+
+  const created = await provider.provision({ provider: "thunder", gpu: "h100", gpuCount: 1, cpu: 4, memoryGb: 16, diskGb: 120, image: "ubuntu-22.04", name: "n", maxLifetimeHours: 8 }, "ssh-ed25519 AAAA naught");
+  const createCall = calls.find((c) => c.path === "/instances/create");
+  check("create posts the documented body", createCall.body, { num_gpus: 1, gpu_type: "h100", cpu_cores: 4, disk_size_gb: 120, template: "ubuntu-22.04", public_key: "ssh-ed25519 AAAA naught" });
+  check("create returns the uuid", created, { instanceId: "uuid-1" });
+
+  listResponses = [{ "41": { uuid: "uuid-1", status: "pending" } }, { "41": { uuid: "uuid-1", status: "running", ip: "1.2.3.4", port: 2222 } }];
+  check("waitReady polls until running with an ip", await provider.waitReady("uuid-1", new AbortController().signal), { host: "1.2.3.4", port: 2222, user: "ubuntu" });
+  listResponses = [{ "41": { uuid: "uuid-1", status: "running", ip: "1.2.3.4" } }];
+  check("status maps running to ready", await provider.status("uuid-1"), "ready");
+  listResponses = [{}];
+  check("a missing instance is terminated", await provider.status("uuid-1"), "terminated");
+  listResponses = [{ "41": { uuid: "uuid-1", status: "error" } }];
+  check("error status", await provider.status("uuid-1"), "error");
+  await provider.terminate("uuid-1");
+  check("terminate deletes by identifier", calls.at(-1), { path: "/instances/41", method: "DELETE", body: undefined, auth: "Bearer tok" });
+
+  listResponses = [{ "41": { uuid: "uuid-1", status: "failed" } }];
+  let failure = "";
+  try { await provider.waitReady("uuid-1", new AbortController().signal); } catch (e) { failure = e.message; }
+  check("waitReady surfaces a failed instance", failure, "Thunder instance uuid-1 reported failed");
+  const aborted = new AbortController();
+  listResponses = [{ "41": { uuid: "uuid-1", status: "pending" } }];
+  setTimeout(() => aborted.abort(), 5);
+  failure = "";
+  try { await provider.waitReady("uuid-1", aborted.signal); } catch (e) { failure = e.message; }
+  check("waitReady honours abort", failure, "aborted");
+  check("parseInstanceList handles an array form", thunder.parseInstanceList({ instances: [{ id: "7", status: "Running", ip: "9.9.9.9" }] }), [{ id: "7", uuid: undefined, status: "running", ip: "9.9.9.9", port: undefined }]);
+}
+
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed ? 1 : 0);
