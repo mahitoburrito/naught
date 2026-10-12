@@ -316,5 +316,66 @@ section("thunder provider");
   check("parseInstanceList handles an array form", thunder.parseInstanceList({ instances: [{ id: "7", status: "Running", ip: "9.9.9.9" }] }), [{ id: "7", uuid: undefined, status: "running", ip: "9.9.9.9", port: undefined }]);
 }
 
+
+// ─── Modal provider ─────────────────────────────────────────────────────────
+
+section("modal provider");
+{
+  const modal = await import(join(dist, "services", "compute", "modal.js"));
+  const gpuImage = modal.buildModalImageCommands({ gpu: "H100" }, "ssh-ed25519 AAAA naught");
+  check("gpu specs build on the CUDA image", gpuImage.base, "nvidia/cuda:12.4.0-devel-ubuntu22.04");
+  check("cpu specs build on plain ubuntu", modal.buildModalImageCommands({}, "k").base, "ubuntu:22.04");
+  const joined = gpuImage.commands.join("\n");
+  check("image installs sshd, git, rsync, python and node", joined.includes("openssh-server git rsync curl ca-certificates python3 nodejs npm"), true);
+  check("image installs both agent CLIs", joined.includes("https://claude.ai/install.sh | bash") && joined.includes("npm install -g @openai/codex"), true);
+  check("image bakes the public key", joined.includes("echo 'ssh-ed25519 AAAA naught' > /root/.ssh/authorized_keys"), true);
+  check("image prepares sshd", joined.includes("mkdir -p /run/sshd") && joined.includes("PermitRootLogin prohibit-password"), true);
+  const spec = { provider: "modal", gpu: "H100", gpuCount: 1, cpu: 4, memoryGb: 16, name: "gpu-1", maxLifetimeHours: 8 };
+  check("sandbox params", modal.toSandboxParams(spec), { command: ["/usr/sbin/sshd", "-D", "-e"], unencryptedPorts: [22], gpu: "H100", cpu: 4, memoryMiB: 16384, timeoutMs: 28_800_000, name: "gpu-1" });
+  check("multi-gpu uses the count suffix", modal.toSandboxParams({ ...spec, gpuCount: 2 }).gpu, "H100:2");
+  check("cpu-only omits gpu", "gpu" in modal.toSandboxParams({ ...spec, gpu: undefined, gpuCount: 0 }), false);
+  check("hourly estimate adds sandbox cpu and memory", modal.estimateModalHourlyUsd(spec), 4.9);
+  check("cpu-only estimate", modal.estimateModalHourlyUsd({ gpu: undefined, gpuCount: 0, cpu: 2, memoryGb: 8 }), 0.48);
+  const offers = modal.modalOffers();
+  check("offers list presets and every gpu class", [offers.length, offers[0].label, offers.find((o) => o.gpu === "H100")?.hourlyUsd], [12, "CPU only · 2 vCPU · 8 GB", 4.9]);
+
+  const events = [];
+  let tunnelCalls = 0;
+  const fakeSandbox = {
+    sandboxId: "sb-123",
+    async tunnels() { tunnelCalls++; if (tunnelCalls === 1) throw new Error("not yet"); return { 22: { host: "r1.modal.host", port: 34567, tcpSocket: ["r1.modal.host", 34567] } }; },
+    async poll() { return events.includes("terminated") ? 0 : null; },
+    async terminate() { events.push("terminated"); },
+  };
+  const fakeClient = {
+    apps: { async fromName(name, params) { events.push(`app:${name}:${params?.createIfMissing}`); return { appId: "ap-1" }; } },
+    images: { fromRegistry(tag) { events.push(`image:${tag}`); return { dockerfileCommands(commands) { events.push(`commands:${commands.length}`); return { tag }; } }; } },
+    sandboxes: {
+      async create(app, image, params) { events.push(["create", app.appId, image.tag, params]); return fakeSandbox; },
+      async fromId(id) { events.push(`fromId:${id}`); return fakeSandbox; },
+      async *list() { yield fakeSandbox; },
+    },
+  };
+  const provider = new modal.ModalProvider({ env: {}, file: { MODAL_TOKEN_ID: "ak", MODAL_TOKEN_SECRET: "as" }, clientFactory: async (t) => { events.push(`client:${t.tokenId}`); return fakeClient; }, pollMs: 1, tcpProbe: async () => true });
+  check("configured from Naught's file", await provider.configured(), { ok: true, source: "naught" });
+  check("unconfigured without tokens", (await new modal.ModalProvider({ env: { MODAL_CONFIG_PATH: "/nonexistent/modal.toml" }, file: {} }).configured()).ok, false);
+  await withLaunchCwd(async (dir) => {
+    const toml = join(dir, "modal.toml");
+    writeFileSync(toml, '[p]\ntoken_id = "det-id"\ntoken_secret = "det-secret"\nactive = true\n');
+    check("detected from ~/.modal.toml", await new modal.ModalProvider({ env: { MODAL_CONFIG_PATH: toml }, file: {} }).configured(), { ok: true, source: "detected" });
+  });
+  check("test proves the token through the app lookup", await provider.test(), { ok: true, message: "Connected · 1 sandbox live" });
+  const created = await provider.provision(spec, "ssh-ed25519 AAAA naught");
+  check("provision returns the sandbox id", created, { instanceId: "sb-123" });
+  const createEvent = events.find((e) => Array.isArray(e) && e[0] === "create");
+  check("provision creates in the naught app from the built image with the params", [createEvent[1], createEvent[2], createEvent[3].unencryptedPorts, createEvent[3].gpu], ["ap-1", "nvidia/cuda:12.4.0-devel-ubuntu22.04", [22], "H100"]);
+  check("waitReady retries tunnels and returns root@host:port", await provider.waitReady("sb-123", new AbortController().signal), { host: "r1.modal.host", port: 34567, user: "root" });
+  check("status is ready while poll is null", await provider.status("sb-123"), "ready");
+  await provider.terminate("sb-123");
+  check("terminate calls the sandbox", events.includes("terminated"), true);
+  check("status is terminated after exit", await provider.status("sb-123"), "terminated");
+  check("the client is built once per token", events.filter((e) => e === "client:ak").length, 1);
+}
+
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed ? 1 : 0);
