@@ -4,28 +4,12 @@ import { existsSync, readFileSync } from "fs";
 import { startServer } from "../server/index";
 import { getActiveSessionCount } from "../server/services/sessionManager";
 import { autoUpdater } from "electron-updater";
-import { initPRBE, cleanupPRBE } from "./prbe";
 import { destroyBrowserView, registerBrowserViewIpc } from "./browserView";
 import { startMacAutoUpdater, installPendingUpdateOnQuit } from "./macUpdater";
 import { safeWebNavigationUrl } from "./externalNavigation";
 import { destroyClipboardIpc, registerClipboardIpc } from "./clipboard";
 import { destroyNativeDialogIpc, registerNativeDialogIpc } from "./nativeDialog";
 
-// Load built-in default config (bundled API keys for production)
-function loadDefaultConfig() {
-  try {
-    const configPath = join(app.getAppPath(), "resources", "default-config.json");
-    if (existsSync(configPath)) {
-      const config = JSON.parse(readFileSync(configPath, "utf-8"));
-      if (config.prbeApiKey && !process.env.PRBE_API_KEY) {
-        process.env.PRBE_API_KEY = config.prbeApiKey;
-      }
-    }
-  } catch (e) {
-    // Default config not available — user can still configure manually
-  }
-}
-loadDefaultConfig();
 
 let mainWindow: BrowserWindow | null = null;
 let serverPort = Number(process.env.PORT) || 6968;
@@ -149,9 +133,6 @@ app.whenReady().then(async () => {
 
   createWindow();
 
-  // Initialize PRBE debug agent
-  initPRBE(mainWindow!, serverPort);
-
   if (autoUpdateEnabled && process.platform === "darwin") {
     // electron-updater can't install into an unsigned mac app — use our
     // custom zip-swap updater instead (electron/macUpdater.ts).
@@ -205,7 +186,6 @@ app.on("will-quit", () => {
   destroyBrowserView();
   destroyClipboardIpc();
   destroyNativeDialogIpc();
-  cleanupPRBE();
   installPendingUpdateOnQuit();
   process.emit("SIGINT" as any);
 });

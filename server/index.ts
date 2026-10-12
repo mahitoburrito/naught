@@ -6,7 +6,7 @@ import { parse as parseUrl } from "url";
 import { join } from "path";
 import { existsSync, readFileSync } from "fs";
 import { apiRoutes } from "./routes/api";
-import { prbeRoutes } from "./routes/prbe";
+import { coordinatorAgentRoutes } from "./routes/coordinatorAgent";
 import { coordinatorRoutes } from "./routes/coordinator";
 import { devboxRoutes } from "./routes/devboxes";
 import {
@@ -68,7 +68,7 @@ app.use("*", async (c, next) => {
   await next();
 });
 app.route("/api", apiRoutes);
-app.route("/api/prbe", prbeRoutes);
+app.route("/api/coordinator-agent", coordinatorAgentRoutes);
 app.route("/api/coordinator", coordinatorRoutes);
 app.route("/api/devboxes", devboxRoutes);
 
