@@ -16,10 +16,10 @@ import {
   ShieldCheck,
   Clock3,
 } from "lucide-react";
-import { usePRBEStore } from "../stores/usePRBEStore";
+import { useCoordinatorAgentStore } from "../stores/useCoordinatorAgentStore";
 import { useStore } from "../stores/useStore";
 import { useCoordinatorStore } from "../stores/useCoordinatorStore";
-import type { PRBEStatusEvent } from "../types/prbe";
+import type { CoordinatorFeedEvent } from "../types/coordinatorAgent";
 
 const terminalDirectiveStates = new Set([
   "completed_unconfirmed", "acknowledged", "rejected", "failed", "expired", "cancelled",
@@ -111,11 +111,12 @@ function CoordinatorOverview() {
   );
 }
 
-function EventItem({ event }: { event: PRBEStatusEvent }) {
+function EventItem({ event }: { event: CoordinatorFeedEvent }) {
   const [expanded, setExpanded] = useState(event.isExpanded);
 
-  const isToolCall = event.label.toLowerCase().includes("tool") || event.label.includes("client_");
-  const isThinking = event.label.toLowerCase().includes("think");
+  // Tool events are labelled with the snake_case tool name; the rest are "Thinking" / "Cancelled".
+  const isThinking = event.label === "Thinking";
+  const isToolCall = /^[a-z_]+$/.test(event.label);
   const isComplete = event.isCompleted;
 
   return (
@@ -155,21 +156,21 @@ function EventItem({ event }: { event: PRBEStatusEvent }) {
   );
 }
 
-export function PRBEPanel() {
+export function CoordinatorPanel() {
   const {
     panelOpen,
     setPanelOpen,
-    isInvestigating,
-    currentQuery,
+    isRunning,
+    currentDirective,
     events,
     report,
-    summary,
-    investigationError,
+    error,
     agentMessage,
-    completedInvestigations,
-    startInvestigation,
-    stopInvestigation,
-  } = usePRBEStore();
+    completedTurns,
+    hasApiKey,
+    startTurn,
+    cancelTurn,
+  } = useCoordinatorAgentStore();
   const { viewMode, browserPanelOpen, browserPanelWidth } = useStore();
   const browserDockOpen = viewMode === "focus" && browserPanelOpen;
 
@@ -193,15 +194,15 @@ export function PRBEPanel() {
 
   const handleSubmit = () => {
     const trimmed = query.trim();
-    if (!trimmed || isInvestigating) return;
-    startInvestigation(trimmed);
+    if (!trimmed || isRunning) return;
+    startTurn(trimmed);
     setQuery("");
   };
 
   const handleSendFollowUp = () => {
     const trimmed = followUpMessage.trim();
     if (!trimmed) return;
-    usePRBEStore.getState().sendMessage(trimmed);
+    useCoordinatorAgentStore.getState().sendMessage(trimmed);
     setFollowUpMessage("");
   };
 
@@ -213,7 +214,7 @@ export function PRBEPanel() {
   };
 
   const hasReport = !!report;
-  const hasError = !!investigationError;
+  const hasError = !!error;
 
   return (
     <AnimatePresence>
@@ -234,7 +235,7 @@ export function PRBEPanel() {
             <div className="flex-1">
               <h2 className="text-sm font-medium text-white">Workspace Coordinator</h2>
               <span className="text-[10px] text-zinc-500">
-                {isInvestigating ? "Coordinating…" : hasReport ? "Coordinator turn complete" : "Monitor and align agent sessions"}
+                {isRunning ? "Coordinating…" : hasReport ? "Coordinator turn complete" : "Monitor and align agent sessions"}
               </span>
             </div>
             <button
@@ -254,12 +255,12 @@ export function PRBEPanel() {
                 onChange={(e) => setQuery(e.target.value)}
                 onKeyDown={handleKeyDown}
                 placeholder="Give the coordinator a directive…"
-                disabled={isInvestigating}
+                disabled={isRunning}
                 className="flex-1 px-3 py-2 rounded-md bg-canvas border border-border text-white text-sm placeholder-zinc-600 focus:outline-none focus:border-zinc-500 transition-colors disabled:opacity-50"
               />
-              {isInvestigating ? (
+              {isRunning ? (
                 <button
-                  onClick={stopInvestigation}
+                  onClick={cancelTurn}
                   className="px-3 py-2 rounded-md bg-red-600 text-white text-sm font-medium hover:bg-red-500 transition-colors flex items-center gap-1.5"
                 >
                   <Square className="w-3.5 h-3.5" />
@@ -283,14 +284,14 @@ export function PRBEPanel() {
           {/* Content area */}
           <div className="flex-1 min-h-0 flex flex-col">
             {/* Active investigation or report */}
-            {(isInvestigating || hasReport || hasError || events.length > 0) ? (
+            {(isRunning || hasReport || hasError || events.length > 0) ? (
               <>
                 {/* Current query */}
-                {currentQuery && (
+                {currentDirective && (
                   <div className="flex-shrink-0 px-4 py-2 bg-surface/50 border-b border-border">
                     <p className="text-xs text-zinc-400">
                       <span className="text-zinc-500">Directive: </span>
-                      {currentQuery}
+                      {currentDirective}
                     </p>
                   </div>
                 )}
@@ -321,7 +322,7 @@ export function PRBEPanel() {
                         <AlertCircle className="w-4 h-4 text-red-400 mt-0.5 flex-shrink-0" />
                         <div>
                           <p className="text-xs font-medium text-red-400">Coordinator Error</p>
-                          <p className="text-xs text-red-400/70 mt-0.5">{investigationError}</p>
+                          <p className="text-xs text-red-400/70 mt-0.5">{error}</p>
                         </div>
                       </div>
                     </div>
@@ -335,9 +336,6 @@ export function PRBEPanel() {
                           <CheckCircle2 className="w-4 h-4 text-green-400" />
                           <span className="text-xs font-medium text-green-400">Coordinator Report</span>
                         </div>
-                        {summary && (
-                          <p className="text-xs text-zinc-400 mb-2 pb-2 border-b border-border">{summary}</p>
-                        )}
                         <div className="text-xs text-zinc-300 whitespace-pre-wrap font-mono leading-relaxed max-h-[400px] overflow-y-auto">
                           {report}
                         </div>
@@ -346,7 +344,7 @@ export function PRBEPanel() {
                   )}
 
                   {/* Loading indicator */}
-                  {isInvestigating && events.length === 0 && (
+                  {isRunning && events.length === 0 && (
                     <div className="px-4 py-6 flex items-center justify-center gap-2">
                       <Loader2 className="w-4 h-4 text-orange-400 animate-spin" />
                       <span className="text-xs text-zinc-500">Starting coordinator turn…</span>
@@ -355,7 +353,7 @@ export function PRBEPanel() {
                 </div>
 
                 {/* Follow-up message input during investigation */}
-                {isInvestigating && (
+                {isRunning && (
                   <div className="flex-shrink-0 px-4 py-2 border-t border-border">
                     <div className="flex gap-2">
                       <input
@@ -385,22 +383,22 @@ export function PRBEPanel() {
             ) : (
               /* Empty / history state */
               <div className="flex-1 flex flex-col">
-                {completedInvestigations.length > 0 ? (
+                {completedTurns.length > 0 ? (
                   <div className="flex-1 overflow-y-auto">
                     <div className="px-4 py-2">
                       <span className="text-[10px] text-zinc-500 uppercase tracking-wider">Recent Coordinator Turns</span>
                     </div>
-                    {completedInvestigations.map((inv) => (
+                    {completedTurns.map((turn) => (
                       <button
-                        key={inv.id}
+                        key={turn.id}
                         onClick={() => {
-                          setQuery(inv.query);
+                          setQuery(turn.directive);
                         }}
                         className="w-full px-4 py-2 text-left hover:bg-surface-active transition-colors border-b border-border/50"
                       >
-                        <p className="text-xs text-zinc-300 truncate">{inv.query}</p>
+                        <p className="text-xs text-zinc-300 truncate">{turn.directive}</p>
                         <p className="text-[10px] text-zinc-500 mt-0.5">
-                          {new Date(inv.completedAt).toLocaleString()}
+                          {new Date(turn.completedAt).toLocaleString()}
                         </p>
                       </button>
                     ))}
@@ -409,10 +407,21 @@ export function PRBEPanel() {
                   <div className="flex-1 flex items-center justify-center">
                     <div className="text-center px-8">
                       <Network className="w-8 h-8 text-zinc-700 mx-auto mb-3" />
-                      <p className="text-sm text-zinc-400 mb-1">Coordinator ready</p>
-                      <p className="text-xs text-zinc-600">
-                        Ask it to inspect sessions, record a shared decision, or route a directive to an exact agent. Terminal submissions remain unconfirmed until acknowledged.
-                      </p>
+                      {hasApiKey ? (
+                        <>
+                          <p className="text-sm text-zinc-400 mb-1">Coordinator ready</p>
+                          <p className="text-xs text-zinc-600">
+                            Ask it to inspect sessions, record a shared decision, or route a directive to an exact agent. Terminal submissions remain unconfirmed until acknowledged.
+                          </p>
+                        </>
+                      ) : (
+                        <>
+                          <p className="text-sm text-zinc-400 mb-1">Coordinator needs an API key</p>
+                          <p className="text-xs text-zinc-600">
+                            Add an Anthropic API key in Settings → Coordination. The local session monitor above works without one.
+                          </p>
+                        </>
+                      )}
                     </div>
                   </div>
                 )}
