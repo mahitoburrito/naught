@@ -2,12 +2,14 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { AnimatePresence, motion } from "framer-motion";
 import {
+  ArrowUpRight,
   Bell,
   FileDiff,
   FileText,
   Folder,
   GitBranch,
   Globe,
+  Home,
   Maximize2,
   Monitor,
   Palette,
@@ -154,6 +156,7 @@ export function CommandPalette() {
     canvasLayoutSnapshots,
     saveCanvasLayoutSnapshot,
     restoreCanvasLayoutSnapshot,
+    openMoveSheet,
   } = useStore();
 
   const [query, setQuery] = useState("");
@@ -550,6 +553,30 @@ export function CommandPalette() {
       };
     });
 
+    // Move to a node / bring back, one entry per session. The selected
+    // session's entry surfaces in the default list; the rest are searchable.
+    const moveCommands = Array.from(sessions.entries()).map(([nodeId, session]) => {
+      const name = session.customName || session.agentName;
+      const remote = !!session.devboxId;
+      const inFlight = !!session.move && session.move.state !== "done" && session.move.state !== "error";
+      return {
+        id: `move-session-${nodeId}`,
+        title: remote ? `Bring session back: ${name}` : `Move session to node: ${name}`,
+        hint: inFlight
+          ? "A move is already in progress"
+          : remote
+            ? `Copy the working tree and conversation back from ${session.devboxName || "the node"}`
+            : "Copy the working tree and conversation to a GPU or bigger machine",
+        icon: remote ? Home : ArrowUpRight,
+        surface: nodeId === selectedNodeId,
+        keywords: "move node gpu remote devbox bring back home session",
+        run: () => {
+          if (inFlight) return;
+          openMoveSheet(nodeId, remote ? "home" : "out");
+        },
+      };
+    });
+
     const layoutCommands = canvasLayoutSnapshots.map((snapshot) => ({
       id: `restore-layout-${snapshot.id}`,
       title: `Sort: Restore canvas layout: ${snapshot.name}`,
@@ -633,6 +660,7 @@ export function CommandPalette() {
       ...taskCommands,
       ...sessionCommands,
       ...focusCommands,
+      ...moveCommands,
       ...repoCommands,
       ...layoutCommands,
       ...workspaceCommands,
@@ -652,6 +680,7 @@ export function CommandPalette() {
     markdownFiles,
     nodes,
     openMarkdownFiles.length,
+    openMoveSheet,
     projectTasks,
     reactFlow,
     restoreCanvasLayoutSnapshot,

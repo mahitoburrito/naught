@@ -11,10 +11,17 @@ export function useAgentNodeState(
   nodeData: AgentNodeData,
   session: AgentSession | undefined
 ) {
-  const { removeNode, removeSession, setSelectedNodeId, setSidebarOpen, setDeleteToast } =
-    useStore();
+  const {
+    removeNode,
+    removeSession,
+    setSelectedNodeId,
+    setSidebarOpen,
+    setDeleteToast,
+    openMoveSheet,
+  } = useStore();
 
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
+  const [moveActionBusy, setMoveActionBusy] = useState(false);
 
   // Close context menu on outside click
   useEffect(() => {
@@ -80,10 +87,38 @@ export function useAgentNodeState(
     setContextMenu(null);
   };
 
+  // Local sessions move out; sessions on a node come home. The sheet plans
+  // against the server and refuses anything the state does not allow.
+  const handleMove = () => {
+    openMoveSheet(id, session?.devboxId ? "home" : "out");
+  };
+
+  const postMoveAction = async (action: "retry" | "cancel") => {
+    const sessionId = session?.sessionId || nodeData.sessionId;
+    if (!sessionId || moveActionBusy) return;
+    setMoveActionBusy(true);
+    try {
+      const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/move/${action}`, { method: "POST" });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data?.error || `Could not ${action} the move`);
+    } catch (error: any) {
+      window.alert(error?.message || `Could not ${action} the move`);
+    } finally {
+      setMoveActionBusy(false);
+    }
+  };
+
+  const handleRetryMove = () => void postMoveAction("retry");
+  const handleCancelMove = () => void postMoveAction("cancel");
+
   return {
     contextMenu,
     handleContextMenu,
     handleDelete,
     closeContextMenu,
+    handleMove,
+    handleRetryMove,
+    handleCancelMove,
+    moveActionBusy,
   };
 }

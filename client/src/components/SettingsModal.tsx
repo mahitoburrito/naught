@@ -4,13 +4,14 @@ import { motion, AnimatePresence } from "framer-motion";
 import type { LucideIcon } from "lucide-react";
 import {
   X, Key, Check, AlertCircle, Loader2, ExternalLink, Bug,
-  SlidersHorizontal, Puzzle, Palette, Type, Monitor, Minus, Plus, Bell, FileText, Sparkles, Terminal, Server,
+  SlidersHorizontal, Puzzle, Palette, Type, Monitor, Minus, Plus, Bell, FileText, Sparkles, Terminal, Server, Cpu,
 } from "lucide-react";
 import { usePRBEStore } from "../stores/usePRBEStore";
 import { useStore } from "../stores/useStore";
 import { SectionHeader, SettingRow } from "./settings/primitives";
 import { SessionsTab } from "./settings/SessionsTab";
 import { DevboxesTab } from "./settings/DevboxesTab";
+import { ComputeTab } from "./settings/ComputeTab";
 import {
   TERMINAL_FONT_FAMILIES,
   TERMINAL_THEMES,
@@ -20,7 +21,7 @@ import {
   type WorkspaceBackgroundId,
 } from "../theme/appearance";
 
-type SettingsTab = "general" | "sessions" | "devboxes" | "appearance" | "integrations";
+type SettingsTab = "general" | "sessions" | "devboxes" | "compute" | "appearance" | "integrations";
 
 interface SettingsModalProps {
   open: boolean;
@@ -31,6 +32,7 @@ const TABS: { id: SettingsTab; label: string; icon: LucideIcon }[] = [
   { id: "general", label: "General", icon: SlidersHorizontal },
   { id: "sessions", label: "Sessions", icon: Terminal },
   { id: "devboxes", label: "Devboxes", icon: Server },
+  { id: "compute", label: "Compute", icon: Cpu },
   { id: "appearance", label: "Appearance", icon: Palette },
   { id: "integrations", label: "Integrations", icon: Puzzle },
 ];
@@ -334,6 +336,7 @@ export function SettingsModal({ open, onClose }: SettingsModalProps) {
                       setAutoCareful={setAutoCareful}
                     />}
                     {tab === "devboxes" && <DevboxesTab />}
+                    {tab === "compute" && <ComputeTab />}
                     {tab === "appearance" && <AppearanceTab
                       workspaceBackground={workspaceBackground}
                       setWorkspaceBackground={setWorkspaceBackground}
@@ -375,9 +378,9 @@ export function SettingsModal({ open, onClose }: SettingsModalProps) {
 
                 {/* Footer */}
                 <div className="px-5 py-3.5 border-t border-border flex justify-end gap-2 flex-shrink-0">
-                  {/* Appearance and Devboxes apply immediately — a Save button
-                      there would imply changes are pending when they are not. */}
-                  {tab === "appearance" || tab === "devboxes" ? (
+                  {/* Appearance, Devboxes and Compute apply immediately — a Save
+                      button there would imply changes are pending when they are not. */}
+                  {tab === "appearance" || tab === "devboxes" || tab === "compute" ? (
                     <button
                       onClick={onClose}
                       className="px-4 py-1.5 rounded-md text-sm font-medium bg-zinc-200 text-zinc-950 hover:bg-zinc-100 transition-colors"
