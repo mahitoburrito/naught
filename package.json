@@ -1,7 +1,7 @@
 {
   "name": "@mahitoburrito/openui-desktop",
   "version": "1.0.9",
-  "description": "AI Agent Command Center — Desktop App",
+  "description": "AI Agent Command Center \u2014 Desktop App",
   "main": "dist/electron/electron/main.js",
   "author": "mahitoburrito <mahitraj@gmail.com>",
   "license": "MIT",
@@ -22,7 +22,8 @@
   ],
   "bin": {
     "openui-desktop": "./bin/openui-desktop",
-    "openui-control": "./bin/openui-control.js"
+    "openui-control": "./bin/openui-control.js",
+    "naught": "./bin/naught.js"
   },
   "files": [
     "bin/",
@@ -50,7 +51,13 @@
     "prepublishOnly": "npm run build",
     "postinstall": "npm ci --prefix client && node scripts/fix-node-pty-permissions.mjs",
     "test:teardown": "npm run build:electron && node scripts/smoke-session-teardown.mjs",
-    "test:devboxes": "npm run build:electron && node scripts/test-devboxes.mjs"
+    "test:devboxes": "npm run build:electron && node scripts/test-devboxes.mjs",
+    "test:compute": "npm run build:electron && node scripts/test-compute.mjs",
+    "test:naught": "node scripts/test-naught-cli.mjs",
+    "test:manifest": "bash scripts/test-manifest-py.sh",
+    "test:move": "npm run build:electron && node scripts/test-move.mjs",
+    "test:move:docker": "npm run build:electron && node scripts/test-move-docker.mjs",
+    "smoke:compute-live": "npm run build:electron && node scripts/smoke-compute-live.mjs"
   },
   "dependencies": {
     "@hono/node-server": "^2.0.8",
