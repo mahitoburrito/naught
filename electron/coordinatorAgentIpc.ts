@@ -31,9 +31,10 @@ function getAgent(serverPort: number): CoordinatorAgent | { error: string } {
   const config = loadCoordinatorAgentConfig();
   const credentials = resolveCoordinatorCredentials(config);
   if (!credentials.apiKey) return { error: NO_KEY_MESSAGE };
-  if (agent && agentApiKey === credentials.apiKey) return agent;
+  // A key saved mid-turn applies to the next turn; swapping the agent under a
+  // running turn would let its final state emission clobber the new agent's.
+  if (agent && (agentApiKey === credentials.apiKey || agent.getState().isRunning)) return agent;
 
-  agent?.cancel();
   agentApiKey = credentials.apiKey;
   agent = new CoordinatorAgent({
     client: new Anthropic({ apiKey: credentials.apiKey }),
