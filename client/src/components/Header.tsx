@@ -1,10 +1,10 @@
 import { Folder, Grid3X3, Maximize2, MousePointer2, Network, Search, Settings } from "lucide-react";
 import { useStore } from "../stores/useStore";
-import { usePRBEStore } from "../stores/usePRBEStore";
+import { useCoordinatorAgentStore } from "../stores/useCoordinatorAgentStore";
 
 export function Header() {
-  const setCoordinatorOpen = usePRBEStore((state) => state.setPanelOpen);
-  const coordinatorOpen = usePRBEStore((state) => state.panelOpen);
+  const setCoordinatorOpen = useCoordinatorAgentStore((state) => state.setPanelOpen);
+  const coordinatorOpen = useCoordinatorAgentStore((state) => state.panelOpen);
   const {
     sessions,
     launchCwd,

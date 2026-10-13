@@ -3,10 +3,11 @@ import { createPortal } from "react-dom";
 import { motion, AnimatePresence } from "framer-motion";
 import type { LucideIcon } from "lucide-react";
 import {
-  X, Key, Check, AlertCircle, Loader2, ExternalLink, Bug,
+  X, Key, Check, AlertCircle, Loader2, ExternalLink, Network,
   SlidersHorizontal, Puzzle, Palette, Type, Monitor, Minus, Plus, Bell, FileText, Sparkles, Terminal, Server,
 } from "lucide-react";
-import { usePRBEStore } from "../stores/usePRBEStore";
+import { useCoordinatorAgentStore } from "../stores/useCoordinatorAgentStore";
+import type { CoordinatorCredentialSource } from "../types/coordinatorAgent";
 import { useStore } from "../stores/useStore";
 import { SectionHeader, SettingRow } from "./settings/primitives";
 import { SessionsTab } from "./settings/SessionsTab";
@@ -56,7 +57,7 @@ export function SettingsModal({ open, onClose }: SettingsModalProps) {
   const [agentRules, setAgentRules] = useState("");
   const [isSaving, setIsSaving] = useState(false);
 
-  const prbeStore = usePRBEStore();
+  const coordinatorStore = useCoordinatorAgentStore();
   const {
     workspaceBackground,
     setWorkspaceBackground,
@@ -67,10 +68,10 @@ export function SettingsModal({ open, onClose }: SettingsModalProps) {
     terminalFontSize,
     setTerminalFontSize,
   } = useStore();
-  const [prbeApiKey, setPrbeApiKey] = useState("");
-  const [hasPrbeKey, setHasPrbeKey] = useState(false);
-  const [isPrbeBuiltIn, setIsPrbeBuiltIn] = useState(false);
-  const [isPrbeSaving, setIsPrbeSaving] = useState(false);
+  const [coordinatorApiKey, setCoordinatorApiKey] = useState("");
+  const [hasCoordinatorKey, setHasCoordinatorKey] = useState(false);
+  const [coordinatorKeySource, setCoordinatorKeySource] = useState<CoordinatorCredentialSource>(null);
+  const [isCoordinatorSaving, setIsCoordinatorSaving] = useState(false);
   const [geminiApiKey, setGeminiApiKey] = useState("");
   const [hasGeminiKey, setHasGeminiKey] = useState(false);
   const [geminiModel, setGeminiModel] = useState("gemini-2.5-flash");
@@ -78,11 +79,11 @@ export function SettingsModal({ open, onClose }: SettingsModalProps) {
 
   useEffect(() => {
     if (open) {
-      fetch("/api/prbe/config")
+      fetch("/api/coordinator-agent/config")
         .then((res) => res.json())
         .then((config) => {
-          setHasPrbeKey(config.hasApiKey);
-          setIsPrbeBuiltIn(config.isBuiltIn ?? false);
+          setHasCoordinatorKey(!!config.hasApiKey);
+          setCoordinatorKeySource(config.source ?? null);
         })
         .catch(console.error);
 
@@ -188,38 +189,43 @@ export function SettingsModal({ open, onClose }: SettingsModalProps) {
     }
   };
 
-  const handlePrbeSave = async () => {
-    if (!prbeApiKey.trim()) return;
-    setIsPrbeSaving(true);
+  const applyCoordinatorConfig = (config: { hasApiKey?: boolean; source?: CoordinatorCredentialSource }) => {
+    setHasCoordinatorKey(!!config.hasApiKey);
+    setCoordinatorKeySource(config.source ?? null);
+    setCoordinatorApiKey("");
+    if (window.electronAPI?.isElectron) coordinatorStore.checkAvailability();
+  };
+
+  const handleCoordinatorSave = async () => {
+    if (!coordinatorApiKey.trim()) return;
+    setIsCoordinatorSaving(true);
     try {
-      await fetch("/api/prbe/config", {
+      const res = await fetch("/api/coordinator-agent/config", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ apiKey: prbeApiKey.trim() }),
+        body: JSON.stringify({ apiKey: coordinatorApiKey.trim() }),
       });
-      setHasPrbeKey(true);
-      setPrbeApiKey("");
-      if (window.electronAPI?.isElectron) {
-        await prbeStore.initialize();
-      }
+      applyCoordinatorConfig(await res.json());
     } catch (e) {
-      console.error("Failed to save PRBE config:", e);
+      console.error("Failed to save coordinator config:", e);
     } finally {
-      setIsPrbeSaving(false);
+      setIsCoordinatorSaving(false);
     }
   };
 
-  const handlePrbeRemoveKey = async () => {
+  const handleCoordinatorRemoveKey = async () => {
+    setIsCoordinatorSaving(true);
     try {
-      await fetch("/api/prbe/config", {
+      const res = await fetch("/api/coordinator-agent/config", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ apiKey: "" }),
       });
-      setHasPrbeKey(false);
-      setPrbeApiKey("");
+      applyCoordinatorConfig(await res.json());
     } catch (e) {
-      console.error("Failed to remove PRBE key:", e);
+      console.error("Failed to remove coordinator key:", e);
+    } finally {
+      setIsCoordinatorSaving(false);
     }
   };
 
@@ -355,13 +361,13 @@ export function SettingsModal({ open, onClose }: SettingsModalProps) {
                       handleRemoveKey={handleRemoveKey}
                       ticketPromptTemplate={ticketPromptTemplate}
                       setTicketPromptTemplate={setTicketPromptTemplate}
-                      prbeApiKey={prbeApiKey}
-                      setPrbeApiKey={setPrbeApiKey}
-                      hasPrbeKey={hasPrbeKey}
-                      isPrbeBuiltIn={isPrbeBuiltIn}
-                      isPrbeSaving={isPrbeSaving}
-                      handlePrbeSave={handlePrbeSave}
-                      handlePrbeRemoveKey={handlePrbeRemoveKey}
+                      coordinatorApiKey={coordinatorApiKey}
+                      setCoordinatorApiKey={setCoordinatorApiKey}
+                      hasCoordinatorKey={hasCoordinatorKey}
+                      coordinatorKeySource={coordinatorKeySource}
+                      isCoordinatorSaving={isCoordinatorSaving}
+                      handleCoordinatorSave={handleCoordinatorSave}
+                      handleCoordinatorRemoveKey={handleCoordinatorRemoveKey}
                       geminiApiKey={geminiApiKey}
                       setGeminiApiKey={setGeminiApiKey}
                       hasGeminiKey={hasGeminiKey}
@@ -673,13 +679,13 @@ function IntegrationsTab({
   handleRemoveKey,
   ticketPromptTemplate,
   setTicketPromptTemplate,
-  prbeApiKey,
-  setPrbeApiKey,
-  hasPrbeKey,
-  isPrbeBuiltIn,
-  isPrbeSaving,
-  handlePrbeSave,
-  handlePrbeRemoveKey,
+  coordinatorApiKey,
+  setCoordinatorApiKey,
+  hasCoordinatorKey,
+  coordinatorKeySource,
+  isCoordinatorSaving,
+  handleCoordinatorSave,
+  handleCoordinatorRemoveKey,
   geminiApiKey,
   setGeminiApiKey,
   hasGeminiKey,
@@ -698,13 +704,13 @@ function IntegrationsTab({
   handleRemoveKey: () => void;
   ticketPromptTemplate: string;
   setTicketPromptTemplate: (v: string) => void;
-  prbeApiKey: string;
-  setPrbeApiKey: (v: string) => void;
-  hasPrbeKey: boolean;
-  isPrbeBuiltIn: boolean;
-  isPrbeSaving: boolean;
-  handlePrbeSave: () => void;
-  handlePrbeRemoveKey: () => void;
+  coordinatorApiKey: string;
+  setCoordinatorApiKey: (v: string) => void;
+  hasCoordinatorKey: boolean;
+  coordinatorKeySource: CoordinatorCredentialSource;
+  isCoordinatorSaving: boolean;
+  handleCoordinatorSave: () => void;
+  handleCoordinatorRemoveKey: () => void;
   geminiApiKey: string;
   setGeminiApiKey: (v: string) => void;
   hasGeminiKey: boolean;
@@ -890,13 +896,13 @@ function IntegrationsTab({
         </div>
       </div>
 
-      {/* PRBE-backed Coordinator */}
+      {/* Claude-backed Coordinator */}
       <SectionHeader title="Coordination" />
       <div className="rounded-lg border border-border bg-canvas/40">
         <div className="px-4 py-3.5 space-y-3">
           <div className="flex items-center gap-2">
             <div className="w-5 h-5 rounded bg-orange-500/20 flex items-center justify-center">
-              <Bug className="w-3.5 h-3.5 text-orange-400" />
+              <Network className="w-3.5 h-3.5 text-orange-400" />
             </div>
             <span className="text-sm text-zinc-200">Workspace Coordinator Agent</span>
           </div>
@@ -911,54 +917,53 @@ function IntegrationsTab({
 
           {window.electronAPI?.isElectron && (
             <>
-              {hasPrbeKey && isPrbeBuiltIn ? (
+              {hasCoordinatorKey && coordinatorKeySource === "settings" ? (
                 <>
                   <div className="flex items-center gap-2 px-3 py-2 rounded-md bg-green-500/10 border border-green-500/20">
                     <Check className="w-4 h-4 text-green-500" />
-                    <span className="text-sm text-green-400">Coordinator agent active</span>
-                  </div>
-                  <p className="text-xs text-zinc-500">
-                    Built-in coordination is enabled. You can monitor sessions, record shared decisions, and route guarded directives.
-                  </p>
-                </>
-              ) : hasPrbeKey ? (
-                <>
-                  <div className="flex items-center gap-2 px-3 py-2 rounded-md bg-green-500/10 border border-green-500/20">
-                    <Check className="w-4 h-4 text-green-500" />
-                    <span className="text-sm text-green-400">PRBE API key configured</span>
+                    <span className="text-sm text-green-400">Anthropic API key configured</span>
                     <button
-                      onClick={handlePrbeRemoveKey}
+                      onClick={handleCoordinatorRemoveKey}
+                      disabled={isCoordinatorSaving}
                       className="ml-auto text-xs text-zinc-500 hover:text-red-400 transition-colors"
                     >
                       Remove
                     </button>
                   </div>
                   <p className="text-xs text-zinc-500">
-                    Using a custom API key for the workspace coordinator agent.
+                    The coordinator runs on Claude (claude-opus-5) with this key. It can inspect sessions, record shared decisions and route guarded directives.
                   </p>
                 </>
               ) : (
                 <>
+                  {hasCoordinatorKey && coordinatorKeySource === "env" ? (
+                    <div className="flex items-center gap-2 px-3 py-2 rounded-md bg-green-500/10 border border-green-500/20">
+                      <Check className="w-4 h-4 text-green-500" />
+                      <span className="text-sm text-green-400">Using ANTHROPIC_API_KEY from the environment</span>
+                    </div>
+                  ) : null}
                   <p className="text-xs text-zinc-500">
-                    Connect PRBE to add natural-language coordination to the local session monitor.
+                    {hasCoordinatorKey
+                      ? "Save a key here to use it instead of the environment key."
+                      : "Add an Anthropic API key to give the coordinator a Claude brain (claude-opus-5). The local session monitor works without one."}
                   </p>
                   <div className="flex gap-2">
                     <div className="relative flex-1">
                       <Key className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-zinc-500" />
                       <input
                         type="password"
-                        value={prbeApiKey}
-                        onChange={(e) => setPrbeApiKey(e.target.value)}
-                        placeholder="prbe_..."
+                        value={coordinatorApiKey}
+                        onChange={(e) => setCoordinatorApiKey(e.target.value)}
+                        placeholder="sk-ant-..."
                         className="w-full pl-9 pr-3 py-2 rounded-md bg-canvas border border-border text-white text-sm placeholder-zinc-600 focus:outline-none focus:border-zinc-500 transition-colors"
                       />
                     </div>
                     <button
-                      onClick={handlePrbeSave}
-                      disabled={!prbeApiKey.trim() || isPrbeSaving}
+                      onClick={handleCoordinatorSave}
+                      disabled={!coordinatorApiKey.trim() || isCoordinatorSaving}
                       className="px-3 py-2 rounded-md bg-orange-600 text-white text-sm font-medium hover:bg-orange-500 disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center gap-1.5"
                     >
-                      {isPrbeSaving ? <Loader2 className="w-4 h-4 animate-spin" /> : "Save"}
+                      {isCoordinatorSaving ? <Loader2 className="w-4 h-4 animate-spin" /> : "Save"}
                     </button>
                   </div>
                 </>

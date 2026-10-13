@@ -139,7 +139,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           npm audit --omit=dev --audit-level=high
-          npm --prefix client audit --audit-level=high
+          npm --prefix client audit --omit=dev --audit-level=high
 
   version:
     needs: validate
@@ -226,11 +226,6 @@ jobs:
       - name: Install Python setuptools (Windows)
         run: pip install setuptools
         if: runner.os == 'Windows'
-
-      - name: Inject PRBE API key
-        run: echo '{"prbeApiKey":"'"$PRBE_API_KEY"'"}' > resources/default-config.json
-        env:
-          PRBE_API_KEY: ${{ secrets.PRBE_API_KEY }}
 
       - name: Mark release-channel build (enables auto-update by default)
         run: echo '{"channel":"release"}' > resources/build-info.json

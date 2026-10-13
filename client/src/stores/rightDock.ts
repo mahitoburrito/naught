@@ -1,5 +1,5 @@
 import { useStore } from "./useStore";
-import { usePRBEStore } from "./usePRBEStore";
+import { useCoordinatorAgentStore } from "./useCoordinatorAgentStore";
 
 /**
  * The right edge has two docks.
@@ -39,11 +39,11 @@ export function installRightDockExclusion(): () => void {
 
   const unsubscribeSidebar = useStore.subscribe((state, previous) => {
     if (state.sidebarOpen && !previous.sidebarOpen) {
-      claimInnerDock(() => usePRBEStore.getState().setPanelOpen(false));
+      claimInnerDock(() => useCoordinatorAgentStore.getState().setPanelOpen(false));
     }
   });
 
-  const unsubscribeCoordinator = usePRBEStore.subscribe((state, previous) => {
+  const unsubscribeCoordinator = useCoordinatorAgentStore.subscribe((state, previous) => {
     if (state.panelOpen && !previous.panelOpen) {
       claimInnerDock(() => useStore.getState().setSidebarOpen(false));
     }
@@ -58,16 +58,16 @@ export function installRightDockExclusion(): () => void {
   const unsubscribeViewMode = useStore.subscribe((state, previous) => {
     if (state.viewMode !== "focus" || previous.viewMode === "focus") return;
     if (state.sidebarOpen) useStore.getState().setSidebarOpen(false);
-    if (usePRBEStore.getState().panelOpen) usePRBEStore.getState().setPanelOpen(false);
+    if (useCoordinatorAgentStore.getState().panelOpen) useCoordinatorAgentStore.getState().setPanelOpen(false);
   });
 
   // Normalise whatever the app started with, in case restored state or an
   // early open left more than one of them set before this ran.
   if (useStore.getState().viewMode === "focus") {
     if (useStore.getState().sidebarOpen) useStore.getState().setSidebarOpen(false);
-    if (usePRBEStore.getState().panelOpen) usePRBEStore.getState().setPanelOpen(false);
-  } else if (useStore.getState().sidebarOpen && usePRBEStore.getState().panelOpen) {
-    usePRBEStore.getState().setPanelOpen(false);
+    if (useCoordinatorAgentStore.getState().panelOpen) useCoordinatorAgentStore.getState().setPanelOpen(false);
+  } else if (useStore.getState().sidebarOpen && useCoordinatorAgentStore.getState().panelOpen) {
+    useCoordinatorAgentStore.getState().setPanelOpen(false);
   }
 
   return () => {

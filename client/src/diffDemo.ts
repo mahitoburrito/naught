@@ -6,5 +6,5 @@ interface DemoUser {
 }
 
 export const users: DemoUser[] = [
-  { id: 1, name: "Ash", email: "ash@prbe.ai" },
+  { id: 1, name: "Ash", email: "ash@example.com" },
 ];
