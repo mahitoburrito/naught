@@ -18,7 +18,8 @@ interface CoordinatorAgentStore extends CoordinatorAgentState {
   startTurn: (directive: string) => Promise<void>;
   cancelTurn: () => Promise<void>;
   respondToInteraction: (interactionId: string, response: InteractionResponse) => Promise<void>;
-  sendMessage: (message: string) => Promise<void>;
+  /** Resolves false when no turn is running any more, so the caller can keep the text. */
+  sendMessage: (message: string) => Promise<boolean>;
 
   // Internal — called by IPC listeners
   _onState: (state: CoordinatorAgentState) => void;
@@ -99,8 +100,12 @@ export const useCoordinatorAgentStore = create<CoordinatorAgentStore>((set, get)
     const api = window.electronAPI;
     if (!api?.isElectron) return;
     try {
-      await api.invoke("coordinator-agent:respond-interaction", { interactionId, response });
-      set({ pendingInteraction: undefined });
+      const result = await api.invoke("coordinator-agent:respond-interaction", { interactionId, response });
+      // Only clear the dialog this reply answered; a late or rejected reply must
+      // not erase a newer question the agent has since asked.
+      if (result?.success && get().pendingInteraction?.interactionId === interactionId) {
+        set({ pendingInteraction: undefined });
+      }
     } catch (e) {
       console.error("[coordinator] Failed to respond to interaction:", e);
     }
@@ -108,11 +113,13 @@ export const useCoordinatorAgentStore = create<CoordinatorAgentStore>((set, get)
 
   sendMessage: async (message) => {
     const api = window.electronAPI;
-    if (!api?.isElectron) return;
+    if (!api?.isElectron) return false;
     try {
-      await api.invoke("coordinator-agent:send-message", { message });
+      const result = await api.invoke("coordinator-agent:send-message", { message });
+      return !!result?.success;
     } catch (e) {
       console.error("[coordinator] Failed to send message:", e);
+      return false;
     }
   },
 

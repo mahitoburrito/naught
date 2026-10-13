@@ -199,11 +199,13 @@ export function CoordinatorPanel() {
     setQuery("");
   };
 
-  const handleSendFollowUp = () => {
+  const handleSendFollowUp = async () => {
     const trimmed = followUpMessage.trim();
     if (!trimmed) return;
-    useCoordinatorAgentStore.getState().sendMessage(trimmed);
     setFollowUpMessage("");
+    const delivered = await useCoordinatorAgentStore.getState().sendMessage(trimmed);
+    // The turn ended before the follow-up landed: keep the text as the next directive.
+    if (!delivered) setQuery(trimmed);
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
