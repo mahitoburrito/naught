@@ -156,6 +156,7 @@ export class CoordinatorAgent {
     turn.abort.abort();
     this.pending?.resolve(null);
     this.pending = null;
+    this.state.pendingInteraction = undefined;
     this.addEvent("Cancelled", undefined, true);
     this.state.isRunning = false;
     this.emit();
@@ -206,11 +207,19 @@ export class CoordinatorAgent {
         return;
       }
 
+      // Once the user denies a confirmation, nothing else in the same batch may
+      // run: the model may have queued the very mutation it asked about.
       const results: Anthropic.Beta.BetaToolResultBlockParam[] = [];
+      let denied = false;
       for (const toolUse of toolUses) {
-        const result = await this.executeTool(toolUse, turn);
+        if (denied) {
+          results.push(this.skipTool(toolUse));
+          continue;
+        }
+        const { result, deniedByUser } = await this.executeTool(toolUse, turn);
         if (this.isStale(turn)) return;
         results.push(result);
+        if (deniedByUser) denied = true;
       }
       this.messages.push({ role: "user", content: results });
       this.emit();
@@ -265,26 +274,41 @@ export class CoordinatorAgent {
     this.emit();
   }
 
-  private async executeTool(toolUse: Anthropic.Beta.BetaToolUseBlock, turn: Turn): Promise<Anthropic.Beta.BetaToolResultBlockParam> {
+  private async executeTool(
+    toolUse: Anthropic.Beta.BetaToolUseBlock,
+    turn: Turn,
+  ): Promise<{ result: Anthropic.Beta.BetaToolResultBlockParam; deniedByUser: boolean }> {
     const inputJson = JSON.stringify(toolUse.input, null, 2);
     const event = this.addEvent(toolUse.name, inputJson, false);
-    const result = (INTERACTION_TOOL_NAMES as readonly string[]).includes(toolUse.name)
+    const outcome = (INTERACTION_TOOL_NAMES as readonly string[]).includes(toolUse.name)
       ? await this.runInteraction(toolUse, turn)
-      : await this.options.tools.run(toolUse.name, toolUse.input, { signal: turn.abort.signal });
+      : { ...(await this.options.tools.run(toolUse.name, toolUse.input, { signal: turn.abort.signal })), deniedByUser: false };
     event.isCompleted = true;
-    event.detail = truncate(`${inputJson}\n→ ${result.content}`);
+    event.detail = truncate(`${inputJson}\n→ ${outcome.content}`);
     if (!this.isStale(turn)) this.emit();
     return {
-      type: "tool_result",
-      tool_use_id: toolUse.id,
-      content: result.content,
-      ...(result.isError ? { is_error: true } : {}),
+      result: {
+        type: "tool_result",
+        tool_use_id: toolUse.id,
+        content: outcome.content,
+        ...(outcome.isError ? { is_error: true } : {}),
+      },
+      deniedByUser: outcome.deniedByUser,
     };
   }
 
-  private async runInteraction(toolUse: Anthropic.Beta.BetaToolUseBlock, turn: Turn): Promise<ToolRunResult> {
+  private skipTool(toolUse: Anthropic.Beta.BetaToolUseBlock): Anthropic.Beta.BetaToolResultBlockParam {
+    const content = "Skipped: the user denied the preceding confirmation, so this call was not made";
+    this.addEvent(toolUse.name, truncate(`${JSON.stringify(toolUse.input, null, 2)}\n→ ${content}`), true);
+    return { type: "tool_result", tool_use_id: toolUse.id, content, is_error: true };
+  }
+
+  private async runInteraction(
+    toolUse: Anthropic.Beta.BetaToolUseBlock,
+    turn: Turn,
+  ): Promise<ToolRunResult & { deniedByUser: boolean }> {
     const input = interactionInput(this.options.tools.definitions, toolUse.name, toolUse.input);
-    if (!input) return { content: `Invalid input for ${toolUse.name}`, isError: true };
+    if (!input) return { content: `Invalid input for ${toolUse.name}`, isError: true, deniedByUser: false };
     const interactionId = randomUUID();
     const payload: InteractionPayload =
       toolUse.name === "ask_user"
@@ -301,11 +325,19 @@ export class CoordinatorAgent {
       this.pending = null;
       this.state.pendingInteraction = undefined;
     }
-    if (!response || this.isStale(turn)) return { content: "Cancelled before the user answered", isError: true };
+    if (!response || this.isStale(turn)) {
+      return { content: "Cancelled before the user answered", isError: true, deniedByUser: true };
+    }
 
     this.state.resolvedInteractions.push({ interactionId, payload, response });
-    if (response.type === "ask_question") return { content: `User answered: ${response.answer}`, isError: false };
-    return { content: `${response.approved ? "User approved" : "User denied"}: ${input.action}`, isError: false };
+    if (response.type === "ask_question") {
+      return { content: `User answered: ${response.answer}`, isError: false, deniedByUser: false };
+    }
+    return {
+      content: `${response.approved ? "User approved" : "User denied"}: ${input.action}`,
+      isError: false,
+      deniedByUser: !response.approved,
+    };
   }
 
   private recordCompletedTurn(): void {

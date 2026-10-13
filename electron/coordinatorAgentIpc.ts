@@ -2,6 +2,7 @@ import { BrowserWindow, ipcMain } from "electron";
 import Anthropic from "@anthropic-ai/sdk";
 import { homedir } from "os";
 import {
+  DEFAULT_COORDINATOR_MODEL,
   loadCoordinatorAgentConfig,
   resolveCoordinatorCredentials,
 } from "../server/services/coordinatorAgentConfig";
@@ -20,6 +21,7 @@ const NO_KEY_MESSAGE = "Add an Anthropic API key in Settings â†’ Integrations â†
 let mainWindowRef: BrowserWindow | null = null;
 let agent: CoordinatorAgent | null = null;
 let agentApiKey: string | null = null;
+let agentModel: string | null = null;
 
 function send(channel: string, payload: unknown) {
   if (mainWindowRef && !mainWindowRef.isDestroyed()) {
@@ -31,14 +33,17 @@ function getAgent(serverPort: number): CoordinatorAgent | { error: string } {
   const config = loadCoordinatorAgentConfig();
   const credentials = resolveCoordinatorCredentials(config);
   if (!credentials.apiKey) return { error: NO_KEY_MESSAGE };
-  // A key saved mid-turn applies to the next turn; swapping the agent under a
-  // running turn would let its final state emission clobber the new agent's.
-  if (agent && (agentApiKey === credentials.apiKey || agent.getState().isRunning)) return agent;
+  const model = config.model || DEFAULT_COORDINATOR_MODEL;
+  // A key or model saved mid-turn applies to the next turn; swapping the agent
+  // under a running turn would let its final state emission clobber the new one's.
+  const unchanged = agentApiKey === credentials.apiKey && agentModel === model;
+  if (agent && (unchanged || agent.getState().isRunning)) return agent;
 
   agentApiKey = credentials.apiKey;
+  agentModel = model;
   agent = new CoordinatorAgent({
     client: new Anthropic({ apiKey: credentials.apiKey }),
-    model: config.model,
+    model,
     tools: createCoordinatorTools({ serverPort, launchCwd: process.env.LAUNCH_CWD || homedir() }),
     onState: (state) => send("coordinator-agent:state", state),
     onInteraction: (payload) => send("coordinator-agent:interaction", payload),
@@ -93,4 +98,5 @@ export function cleanupCoordinatorAgent() {
   agent?.cancel();
   agent = null;
   agentApiKey = null;
+  agentModel = null;
 }

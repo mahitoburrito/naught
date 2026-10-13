@@ -416,6 +416,43 @@ console.log("\ncoordinatorAgent");
     await agent.startTurn("x");
     check("context window exceeded", [agent.getState().report, agent.getState().error], ["", "The coordinator ran out of context window."]);
   }
+
+  // 19. a denied confirmation skips the rest of that batch; an approved one lets it run
+  for (const [approved, expectSkipped] of [[false, true], [true, false]]) {
+    const posted = [];
+    const recordingFetch = async (url, init = {}) => {
+      if ((init.method || "GET") === "POST") posted.push(new URL(url).pathname);
+      return { ok: true, status: 201, json: async () => ({ id: "dir-1", state: "queued" }) };
+    };
+    const recordingTools = createCoordinatorTools({ serverPort: 7000, launchCwd: dir, fetch: recordingFetch });
+    const client = fakeClient([
+      msg([
+        toolUse("c1", "request_confirmation", { action: "send directive to s1", detail: "run the tests" }),
+        toolUse("d1", "send_directive", { sessionId: "s1", text: "run the tests" }),
+      ], "tool_use"),
+      msg([text("ok")], "end_turn"),
+    ]);
+    const interactions = [];
+    const agent = new CoordinatorAgent({ client, tools: recordingTools, onInteraction: (p) => interactions.push(p) });
+    const run = agent.startTurn("go");
+    await waitFor(() => interactions.length === 1, "confirmation request");
+    agent.respondToInteraction(interactions[0].interactionId, { type: "request_confirmation", approved });
+    await run;
+    const results = client.calls[1].params.messages[2].content;
+    check(`batch after ${approved ? "approval" : "denial"}: mutation ${expectSkipped ? "skipped" : "ran"}`, [posted, results[1].is_error === true, results[1].content.startsWith("Skipped")], expectSkipped ? [[], true, true] : [["/api/coordinator/directives"], false, false]);
+    if (expectSkipped) check("skipped result explains why", results[1].content, "Skipped: the user denied the preceding confirmation, so this call was not made");
+  }
+
+  // 20. cancel while a question is pending clears it from the state
+  {
+    const client = fakeClient([msg([toolUse("q1", "ask_user", { question: "Which?" })], "tool_use")]);
+    const { agent, interactions } = makeAgent(client);
+    const run = agent.startTurn("pick");
+    await waitFor(() => interactions.length === 1, "question pending");
+    agent.cancel();
+    await run;
+    check("cancel clears the pending interaction", [agent.getState().pendingInteraction, agent.getState().isRunning], [undefined, false]);
+  }
   rmSync(dir, { recursive: true, force: true });
 }
 
