@@ -57,8 +57,9 @@ server /api/coordinator-agent/config      (replaces /api/prbe/config)
 Pure module, no Electron import. `createCoordinatorTools({ serverPort,
 launchCwd, fetch })` returns `{ definitions, run }`:
 
-- `definitions`: `Anthropic.Beta.BetaTool[]` with `eager_input_streaming: true`
-  and flat string-parameter JSON schemas for the eight existing tools:
+- `definitions`: `Anthropic.Beta.BetaTool[]` with flat string-parameter JSON
+  schemas (inputs are tiny, so the API's buffered validation is kept rather
+  than eager input streaming) for the eight existing tools:
   `list_active_sessions`, `get_session_status`, `read_session_output`,
   `get_session_activity`, `get_coordination_state`, `record_decision`,
   `send_directive`, `acknowledge_directive`. Descriptions say when to call them.
@@ -114,6 +115,18 @@ renderer):
    re-sent like `pause_turn`. Completed turns are capped at 20 in memory.
    Each turn carries its own abort controller and cancelled flag; a cancelled
    turn that settles after a new one started never touches the new state.
+8. Approval is enforced in code, not only in the prompt: `send_directive` and
+   `record_decision` run only when the user approved a `request_confirmation`
+   earlier in the turn whose `detail` equals the directive text / decision
+   choice exactly, and each approval covers one call. Once the user denies a
+   confirmation, the rest of that tool batch is skipped. `send_directive`
+   also refuses a target whose `agentId` is `shell`, since a directive is
+   pasted and submitted into the target terminal.
+9. A cache breakpoint sits on the latest user message each step so earlier
+   steps are read from cache. After a mid-output fallback, thinking and
+   tool_use blocks before the fallback marker are neither echoed nor run.
+   A turn that ends with no text is an error. Completed turns keep only
+   id, directive, report and time so IPC snapshots stay small.
 
 Cancellation aborts the stream through an `AbortController`, rejects any
 pending interaction, and marks the turn cancelled with no error.
@@ -137,7 +150,9 @@ requests also go over `coordinator-agent:interaction`. Renderer → main:
 ### Config and credentials
 
 `server/services/coordinatorAgentConfig.ts` reads and writes
-`${LAUNCH_CWD}/.openui-desktop/coordinator-agent.json` (`{ apiKey?, model? }`).
+`coordinator-agent.json` in the app's data dir (`OPENUI_DATA_DIR`, else
+`${LAUNCH_CWD}/.openui-desktop`), mode 0600, written atomically
+(`{ apiKey?, model? }`).
 Resolution order: saved key → `ANTHROPIC_API_KEY` → none. The route
 `GET/POST /api/coordinator-agent/config` returns `{ hasApiKey, source:
 "settings" | "env" | null, model }` and accepts `{ apiKey }` (empty string

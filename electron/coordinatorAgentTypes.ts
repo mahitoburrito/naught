@@ -31,13 +31,11 @@ export interface ConversationEntry {
   content: string;
 }
 
+/** Summary of a finished turn; the full feed is not kept so IPC snapshots stay small. */
 export interface CompletedTurn {
   id: string;
   directive: string;
   report: string;
-  events: CoordinatorFeedEvent[];
-  resolvedInteractions: ResolvedInteraction[];
-  conversationHistory: ConversationEntry[];
   completedAt: string;
 }
 

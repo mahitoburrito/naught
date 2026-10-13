@@ -2,7 +2,7 @@
 // Behaviour tests for the Claude-backed workspace coordinator agent:
 // config resolution, tool runner, and the turn loop (fake client, real tools).
 
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs";
+import { mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
@@ -35,6 +35,9 @@ console.log("coordinatorAgentConfig");
   check("empty dir loads empty config", cfg.loadCoordinatorAgentConfig(dir), {});
   cfg.saveCoordinatorAgentConfig({ apiKey: "sk-ant-1", model: "claude-opus-5" }, dir);
   check("save then load round-trips", cfg.loadCoordinatorAgentConfig(dir), { apiKey: "sk-ant-1", model: "claude-opus-5" });
+  check("config lives directly in the data dir", cfg.coordinatorAgentConfigPath(dir), join(dir, "coordinator-agent.json"));
+  check("key file is owner-only", (statSync(cfg.coordinatorAgentConfigPath(dir)).mode & 0o777).toString(8), "600");
+  check("save leaves no temp files behind", readdirSync(dir), ["coordinator-agent.json"]);
   check("settings key beats env", cfg.resolveCoordinatorCredentials({ apiKey: "sk-ant-1" }, { ANTHROPIC_API_KEY: "sk-env" }), { apiKey: "sk-ant-1", source: "settings" });
   check("env key used when settings empty", cfg.resolveCoordinatorCredentials({}, { ANTHROPIC_API_KEY: "sk-env" }), { apiKey: "sk-env", source: "env" });
   check("no key anywhere", cfg.resolveCoordinatorCredentials({}, {}), { apiKey: undefined, source: null });
@@ -60,7 +63,7 @@ console.log("\ncoordinatorTools");
 
   const calls = [];
   const routes = {
-    "GET /api/sessions": { status: 200, body: [{ id: "s1" }] },
+    "GET /api/sessions": { status: 200, body: [{ sessionId: "s1", agentId: "claude" }, { sessionId: "sh", agentId: "shell" }] },
     "GET /api/sessions/s1/status": { status: 200, body: { status: "idle" } },
     "GET /api/sessions/s1/blocks?limit=12": { status: 200, body: { blocks: [] } },
     "GET /api/coordinator/snapshot": { status: 200, body: { mode: "observe" } },
@@ -84,11 +87,11 @@ console.log("\ncoordinatorTools");
     "get_coordination_state", "record_decision", "send_directive", "acknowledge_directive",
     "ask_user", "request_confirmation",
   ]);
-  check("definitions stream input eagerly", tools.definitions.every((t) => t.eager_input_streaming === true), true);
+  check("definitions leave input buffering to the API", tools.definitions.every((t) => t.eager_input_streaming === undefined), true);
   check("every definition is an object schema with required list", tools.definitions.every((t) => t.input_schema.type === "object" && Array.isArray(t.input_schema.required)), true);
   check("interaction tool names", INTERACTION_TOOL_NAMES, ["ask_user", "request_confirmation"]);
 
-  check("list_active_sessions hits /api/sessions", await tools.run("list_active_sessions", {}), { content: JSON.stringify([{ id: "s1" }], null, 2), isError: false });
+  check("list_active_sessions hits /api/sessions", await tools.run("list_active_sessions", {}), { content: JSON.stringify([{ sessionId: "s1", agentId: "claude" }, { sessionId: "sh", agentId: "shell" }], null, 2), isError: false });
   check("list_active_sessions URL uses the server port", last().url, "http://localhost:7000/api/sessions");
   check("get_session_status", await tools.run("get_session_status", { sessionId: "s1" }), { content: JSON.stringify({ status: "idle" }, null, 2), isError: false });
   check("get_session_activity", (await tools.run("get_session_activity", { sessionId: "s1" })).isError, false);
@@ -96,6 +99,9 @@ console.log("\ncoordinatorTools");
 
   await tools.run("send_directive", { sessionId: "s1", text: "do x" });
   check("send_directive posts author coordinator", JSON.parse(last().body), { sessionId: "s1", text: "do x", author: "coordinator" });
+  const postsBefore = calls.filter((c) => c.method === "POST").length;
+  check("send_directive refuses a plain shell target", await tools.run("send_directive", { sessionId: "sh", text: "rm -rf /" }), { content: "Directive was not queued: session sh is a plain shell, not a coding agent", isError: true });
+  check("no POST was made for the shell target", calls.filter((c) => c.method === "POST").length, postsBefore);
   await tools.run("record_decision", { topic: "t", choice: "c", rationale: "r", sessionIds: "s1, s2" });
   check("record_decision splits sessionIds", JSON.parse(last().body).scope, { kind: "sessions", sessionIds: ["s1", "s2"] });
   await tools.run("record_decision", { topic: "t", choice: "c", rationale: "r" });
@@ -198,10 +204,12 @@ console.log("\ncoordinatorAgent");
     check("thinking summarized", first.thinking, { type: "adaptive", display: "summarized" });
     check("system prompt is cached", first.system[0].cache_control, { type: "ephemeral" });
     check("ten tools sent", first.tools.length, 10);
-    check("first request carries the directive", first.messages, [{ role: "user", content: "What is everyone doing?" }]);
+    check("first request carries the directive with a cache breakpoint", first.messages, [{ role: "user", content: [{ type: "text", text: "What is everyone doing?", cache_control: { type: "ephemeral" } }] }]);
     check("abort signal passed to the stream", client.calls[0].opts.signal instanceof AbortSignal, true);
     const second = client.calls[1].params.messages;
     check("second request appends assistant then tool result", [second[1].role, second[2].role, second[2].content.map((b) => [b.type, b.tool_use_id, b.is_error === true])], ["assistant", "user", [["tool_result", "t1", false]]]);
+    check("cache breakpoint moves to the latest user message", [second[0].content[0].cache_control, second[2].content.at(-1).cache_control], [undefined, { type: "ephemeral" }]);
+    check("completed turn keeps only summary fields", Object.keys(state.completedTurns[0]).sort(), ["completedAt", "directive", "id", "report"]);
     check("conversation history has the directive and the reply", state.conversationHistory, [{ role: "user", content: "What is everyone doing?" }, { role: "assistant", content: "Two sessions idle." }]);
   }
 
@@ -276,7 +284,7 @@ console.log("\ncoordinatorAgent");
     ref.agent = agent;
     await agent.startTurn("look");
     const messages = client.calls[1].params.messages;
-    check("follow-up appended after the tool results", [messages.length, messages[3]], [4, { role: "user", content: [{ type: "text", text: "also check s2" }] }]);
+    check("follow-up appended after the tool results", [messages.length, messages[3]], [4, { role: "user", content: [{ type: "text", text: "also check s2", cache_control: { type: "ephemeral" } }] }]);
     check("follow-up recorded in history", agent.getState().conversationHistory.filter((e) => e.role === "user").map((e) => e.content), ["look", "also check s2"]);
   }
 
@@ -366,7 +374,7 @@ console.log("\ncoordinatorAgent");
     for (const release of pending) release();
     await runA;
     await agent.startTurn("B");
-    check("new turn starts from a clean transcript", client.calls[1].params.messages, [{ role: "user", content: "B" }]);
+    check("new turn starts from a clean transcript", client.calls[1].params.messages, [{ role: "user", content: [{ type: "text", text: "B", cache_control: { type: "ephemeral" } }] }]);
     check("only the new turn is recorded", agent.getState().completedTurns.map((t) => t.directive), ["B"]);
   }
 
@@ -401,7 +409,7 @@ console.log("\ncoordinatorAgent");
     const { agent } = makeAgent(client);
     ref.agent = agent;
     await agent.startTurn("look");
-    check("late follow-up triggers one more step", [client.calls.length, client.calls[1].params.messages.at(-1)], [2, { role: "user", content: [{ type: "text", text: "one more thing" }] }]);
+    check("late follow-up triggers one more step", [client.calls.length, client.calls[1].params.messages.at(-1)], [2, { role: "user", content: [{ type: "text", text: "one more thing", cache_control: { type: "ephemeral" } }] }]);
     check("report comes from the last step", agent.getState().report, "done again");
   }
 
@@ -464,6 +472,113 @@ console.log("\ncoordinatorAgent");
     agent.cancel();
     await run;
     check("cancel clears the pending interaction", [agent.getState().pendingInteraction, agent.getState().isRunning], [undefined, false]);
+  }
+
+  // 21. send_directive needs a fresh approval bound to the exact text
+  {
+    const posted = [];
+    const recordingFetch = async (url, init = {}) => {
+      if ((init.method || "GET") === "POST") posted.push(JSON.parse(init.body).text);
+      return { ok: true, status: 201, json: async () => ({ id: "dir-1", state: "queued" }) };
+    };
+    const recordingTools = createCoordinatorTools({ serverPort: 7000, fetch: recordingFetch });
+    const client = fakeClient([
+      msg([toolUse("d0", "send_directive", { sessionId: "s1", text: "run the tests" })], "tool_use"),
+      msg([toolUse("c1", "request_confirmation", { action: "send directive to s1", detail: "run the tests" })], "tool_use"),
+      msg([toolUse("d1", "send_directive", { sessionId: "s1", text: "format the disk" })], "tool_use"),
+      msg([toolUse("d2", "send_directive", { sessionId: "s1", text: "run the tests" })], "tool_use"),
+      msg([toolUse("d3", "send_directive", { sessionId: "s1", text: "run the tests" })], "tool_use"),
+      msg([text("done")], "end_turn"),
+    ]);
+    const interactions = [];
+    const agent = new CoordinatorAgent({ client, tools: recordingTools, onInteraction: (p) => interactions.push(p) });
+    const run = agent.startTurn("go");
+    await waitFor(() => interactions.length === 1, "confirmation request");
+    agent.respondToInteraction(interactions[0].interactionId, { type: "request_confirmation", approved: true });
+    await run;
+    const resultOf = (i) => client.calls[i].params.messages.at(-1).content[0];
+    check("unapproved directive is refused", [resultOf(1).is_error, resultOf(1).content], [true, "send_directive requires an approved request_confirmation whose detail is exactly the directive text; ask for confirmation first"]);
+    check("approval bound to other text does not cover it", resultOf(3).is_error, true);
+    check("matching approval lets it through once", [resultOf(4).is_error === true, resultOf(5).is_error], [false, true]);
+    check("only the approved text was posted", posted, ["run the tests"]);
+  }
+
+  // 22. record_decision needs an approval bound to the exact choice
+  {
+    const posted = [];
+    const recordingFetch = async (url, init = {}) => {
+      if ((init.method || "GET") === "POST") posted.push(new URL(url).pathname);
+      return { ok: true, status: 201, json: async () => ({ id: "dec-1" }) };
+    };
+    const recordingTools = createCoordinatorTools({ serverPort: 7000, fetch: recordingFetch });
+    const client = fakeClient([
+      msg([toolUse("r0", "record_decision", { topic: "db", choice: "postgres", rationale: "r" })], "tool_use"),
+      msg([toolUse("a0", "acknowledge_directive", { directiveId: "dir-1" })], "tool_use"),
+      msg([text("done")], "end_turn"),
+    ]);
+    const agent = new CoordinatorAgent({ client, tools: recordingTools });
+    await agent.startTurn("go");
+    check("unapproved decision is refused, acknowledge is not gated", [client.calls[1].params.messages.at(-1).content[0].is_error, client.calls[2].params.messages.at(-1).content[0].is_error === true, posted], [true, false, ["/api/coordinator/directives/dir-1/acknowledge"]]);
+  }
+
+  // 23. a turn that ends without any reply is an error, not an empty success
+  {
+    const { agent } = makeAgent(fakeClient([msg([thinking("hmm")], "end_turn")]));
+    await agent.startTurn("x");
+    check("empty reply is reported", [agent.getState().error, agent.getState().completedTurns.length], ["The coordinator finished without a reply.", 0]);
+  }
+
+  // 24. thinking summaries in the feed are bounded
+  {
+    const { agent } = makeAgent(fakeClient([msg([thinking("t".repeat(10_000)), text("ok")], "end_turn")]));
+    await agent.startTurn("x");
+    check("long thinking detail is truncated", agent.getState().events[0].detail.length < 4100, true);
+  }
+
+  // 25. a follow-up at the step cap does not throw away the finished report
+  {
+    const ref = {};
+    const client = fakeClient([
+      async () => { ref.agent.sendMessage("and also"); return msg([text("done")], "end_turn"); },
+    ]);
+    const { agent } = makeAgent(client, { maxSteps: 1 });
+    ref.agent = agent;
+    await agent.startTurn("x");
+    check("report kept at the step cap", [agent.getState().report, agent.getState().error, client.calls.length], ["done", undefined, 1]);
+  }
+
+  // 26. a reply of the wrong shape is rejected and the question stays pending
+  {
+    const client = fakeClient([msg([toolUse("q1", "ask_user", { question: "Which?" })], "tool_use"), msg([text("ok")], "end_turn")]);
+    const { agent, interactions } = makeAgent(client);
+    const run = agent.startTurn("pick");
+    await waitFor(() => interactions.length === 1, "question pending");
+    const id = interactions[0].interactionId;
+    check("wrong interaction type rejected", agent.respondToInteraction(id, { type: "request_confirmation", approved: true }), false);
+    check("non-string answer rejected", agent.respondToInteraction(id, { type: "ask_question", answer: 42 }), false);
+    check("question still pending", agent.getState().pendingInteraction?.interactionId, id);
+    agent.respondToInteraction(id, { type: "ask_question", answer: "B" });
+    await run;
+    check("well-formed reply accepted", client.calls[1].params.messages[2].content[0].content, "User answered: B");
+  }
+
+  // 27. after a mid-output fallback, blocks before the fallback marker are not echoed or run
+  {
+    const client = fakeClient([
+      msg([
+        thinking("declined model's reasoning"),
+        toolUse("old", "list_active_sessions", {}),
+        { type: "fallback", from: { model: "claude-opus-5" }, to: { model: "claude-opus-4-8" } },
+        text("continuing"),
+        toolUse("new", "get_coordination_state", {}),
+      ], "tool_use"),
+      msg([text("done")], "end_turn"),
+    ]);
+    const { agent } = makeAgent(client);
+    await agent.startTurn("x");
+    const echoed = client.calls[1].params.messages[1].content.map((b) => b.type);
+    check("pre-fallback thinking and tool_use are dropped from the echo", echoed, ["fallback", "text", "tool_use"]);
+    check("only the post-fallback tool ran", client.calls[1].params.messages[2].content.map((b) => b.tool_use_id), ["new"]);
   }
   rmSync(dir, { recursive: true, force: true });
 }

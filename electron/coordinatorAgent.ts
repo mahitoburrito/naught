@@ -46,8 +46,10 @@ export const COORDINATOR_PREAMBLE =
   "multiple agents need the same conclusion. Send concise directives only when they are necessary, and explain queued or " +
   "unconfirmed delivery honestly. Never infer that terminal submission means an agent understood the directive. Do not answer " +
   "permission prompts, perform destructive lifecycle actions, ship, deploy, merge, or broaden scope without the user's explicit " +
-  "instruction; use request_confirmation when a directive leaves that unclear, and ask_user when the target is ambiguous. " +
-  "Finish with a short plain-language report of what you inspected, what you recorded or queued, and anything the user must do next.";
+  "instruction. Before send_directive, call request_confirmation with detail set to the exact directive text; before " +
+  "record_decision, with detail set to the exact choice. Each approval covers exactly one call. Use ask_user when the target " +
+  "is ambiguous. Finish with a short plain-language report of what you inspected, what you recorded or queued, and anything " +
+  "the user must do next.";
 
 const DEFAULT_MAX_STEPS = 40;
 const MAX_TOKENS = 32000;
@@ -58,6 +60,34 @@ const MAX_COMPLETED_TURNS = 20;
 interface Turn {
   abort: AbortController;
   cancelled: boolean;
+  /** Confirmation details the user approved this turn; each is consumed by one mutation. */
+  approvals: string[];
+}
+
+/** Mutating tools and the input field an approval must match exactly. */
+const APPROVAL_GATES: Record<string, { field: string; label: string }> = {
+  send_directive: { field: "text", label: "directive text" },
+  record_decision: { field: "choice", label: "decision choice" },
+};
+
+function isValidResponse(payload: InteractionPayload, response: InteractionResponse): boolean {
+  if (!response || typeof response !== "object" || response.type !== payload.type) return false;
+  if (response.type === "ask_question") return typeof response.answer === "string";
+  return typeof response.approved === "boolean";
+}
+
+/** After a mid-output fallback, blocks before the marker belong to the declined model and must not be echoed. */
+function echoableContent(content: Anthropic.Beta.BetaContentBlock[]): Anthropic.Beta.BetaContentBlock[] {
+  const boundary = content.map((block) => block.type as string).lastIndexOf("fallback");
+  if (boundary < 0) return content;
+  return content.filter((block, index) => index >= boundary || block.type === "text");
+}
+
+function withCacheBreakpoint(message: Anthropic.Beta.BetaMessageParam): Anthropic.Beta.BetaMessageParam {
+  const blocks = typeof message.content === "string" ? [{ type: "text" as const, text: message.content }] : message.content.slice();
+  if (blocks.length === 0) return message;
+  blocks[blocks.length - 1] = { ...blocks[blocks.length - 1], cache_control: { type: "ephemeral" } } as Anthropic.Beta.BetaContentBlockParam;
+  return { ...message, content: blocks };
 }
 
 class CoordinatorTurnError extends Error {}
@@ -118,9 +148,9 @@ export class CoordinatorAgent {
       currentDirective: directive,
       conversationHistory: [{ role: "user", content: directive }],
     };
-    this.messages = [{ role: "user", content: directive }];
+    this.messages = [{ role: "user", content: [{ type: "text", text: directive }] }];
     this.queuedMessages = [];
-    const turn: Turn = { abort: new AbortController(), cancelled: false };
+    const turn: Turn = { abort: new AbortController(), cancelled: false, approvals: [] };
     this.current = turn;
     this.emit();
 
@@ -171,6 +201,7 @@ export class CoordinatorAgent {
 
   respondToInteraction(interactionId: string, response: InteractionResponse): boolean {
     if (!this.pending || this.pending.payload.interactionId !== interactionId) return false;
+    if (!isValidResponse(this.pending.payload, response)) return false;
     this.pending.resolve(response);
     return true;
   }
@@ -186,8 +217,9 @@ export class CoordinatorAgent {
       const message = await stream.finalMessage();
       if (this.isStale(turn)) return;
 
-      this.messages.push({ role: "assistant", content: message.content });
-      const toolUses = this.recordAssistantBlocks(message);
+      const content = echoableContent(message.content);
+      this.messages.push({ role: "assistant", content });
+      const toolUses = this.recordAssistantBlocks(content);
       const stop = message.stop_reason;
 
       if (stop === "refusal") throw new CoordinatorTurnError("Claude declined this directive.");
@@ -201,9 +233,10 @@ export class CoordinatorAgent {
         throw new CoordinatorTurnError("The coordinator's response was cut off at the token limit.");
       }
       if (stop !== "tool_use" || toolUses.length === 0) {
-        // A follow-up that arrived during the final call still deserves an answer.
-        if (this.queuedMessages.length > 0) continue;
-        this.finishWithReport(message);
+        // A follow-up that arrived during the final call still deserves an answer,
+        // unless answering it would need a step past the cap.
+        if (this.queuedMessages.length > 0 && step < maxSteps) continue;
+        this.finishWithReport(content);
         return;
       }
 
@@ -228,12 +261,16 @@ export class CoordinatorAgent {
   }
 
   private requestParams(): StreamParams {
+    // One breakpoint on the stable prefix, one that walks with the transcript so
+    // every step re-reads the previous steps from cache instead of re-billing them.
+    const messages = this.messages.slice();
+    messages[messages.length - 1] = withCacheBreakpoint(messages[messages.length - 1]);
     return {
       model: this.options.model ?? DEFAULT_COORDINATOR_MODEL,
       max_tokens: MAX_TOKENS,
       system: [{ type: "text", text: COORDINATOR_PREAMBLE, cache_control: { type: "ephemeral" } }],
       tools: this.options.tools.definitions,
-      messages: this.messages.slice(),
+      messages,
       thinking: { type: "adaptive", display: "summarized" },
       betas: ["server-side-fallback-2026-07-01"],
       fallbacks: "default",
@@ -248,11 +285,11 @@ export class CoordinatorAgent {
     this.emit();
   }
 
-  private recordAssistantBlocks(message: Anthropic.Beta.BetaMessage): Anthropic.Beta.BetaToolUseBlock[] {
+  private recordAssistantBlocks(content: Anthropic.Beta.BetaContentBlock[]): Anthropic.Beta.BetaToolUseBlock[] {
     const toolUses: Anthropic.Beta.BetaToolUseBlock[] = [];
-    for (const block of message.content) {
+    for (const block of content) {
       if (block.type === "thinking") {
-        if (block.thinking.trim()) this.addEvent("Thinking", block.thinking, true);
+        if (block.thinking.trim()) this.addEvent("Thinking", truncate(block.thinking), true);
       } else if (block.type === "text") {
         if (block.text.trim()) {
           this.state.agentMessage = block.text;
@@ -266,9 +303,10 @@ export class CoordinatorAgent {
     return toolUses;
   }
 
-  private finishWithReport(message: Anthropic.Beta.BetaMessage): void {
-    const texts = message.content.filter((block): block is Anthropic.Beta.BetaTextBlock => block.type === "text");
+  private finishWithReport(content: Anthropic.Beta.BetaContentBlock[]): void {
+    const texts = content.filter((block): block is Anthropic.Beta.BetaTextBlock => block.type === "text");
     this.state.report = texts.length > 0 ? texts[texts.length - 1].text : this.state.agentMessage || "";
+    if (!this.state.report.trim()) throw new CoordinatorTurnError("The coordinator finished without a reply.");
     // The report is the final word; keep agentMessage for mid-turn replies only.
     this.state.agentMessage = undefined;
     this.emit();
@@ -280,9 +318,12 @@ export class CoordinatorAgent {
   ): Promise<{ result: Anthropic.Beta.BetaToolResultBlockParam; deniedByUser: boolean }> {
     const inputJson = JSON.stringify(toolUse.input, null, 2);
     const event = this.addEvent(toolUse.name, inputJson, false);
-    const outcome = (INTERACTION_TOOL_NAMES as readonly string[]).includes(toolUse.name)
-      ? await this.runInteraction(toolUse, turn)
-      : { ...(await this.options.tools.run(toolUse.name, toolUse.input, { signal: turn.abort.signal })), deniedByUser: false };
+    const refusal = this.approvalGate(toolUse, turn);
+    const outcome = refusal
+      ? { content: refusal, isError: true, deniedByUser: false }
+      : (INTERACTION_TOOL_NAMES as readonly string[]).includes(toolUse.name)
+        ? await this.runInteraction(toolUse, turn)
+        : { ...(await this.options.tools.run(toolUse.name, toolUse.input, { signal: turn.abort.signal })), deniedByUser: false };
     event.isCompleted = true;
     event.detail = truncate(`${inputJson}\n→ ${outcome.content}`);
     if (!this.isStale(turn)) this.emit();
@@ -295,6 +336,19 @@ export class CoordinatorAgent {
       },
       deniedByUser: outcome.deniedByUser,
     };
+  }
+
+  /** Mutations run only on a fresh user approval bound to their exact text; prompt wording is not a gate. */
+  private approvalGate(toolUse: Anthropic.Beta.BetaToolUseBlock, turn: Turn): string | null {
+    const gate = APPROVAL_GATES[toolUse.name];
+    if (!gate) return null;
+    const value = (toolUse.input as Record<string, unknown> | null)?.[gate.field];
+    const index = typeof value === "string" ? turn.approvals.indexOf(value) : -1;
+    if (index < 0) {
+      return `${toolUse.name} requires an approved request_confirmation whose detail is exactly the ${gate.label}; ask for confirmation first`;
+    }
+    turn.approvals.splice(index, 1);
+    return null;
   }
 
   private skipTool(toolUse: Anthropic.Beta.BetaToolUseBlock): Anthropic.Beta.BetaToolResultBlockParam {
@@ -333,6 +387,7 @@ export class CoordinatorAgent {
     if (response.type === "ask_question") {
       return { content: `User answered: ${response.answer}`, isError: false, deniedByUser: false };
     }
+    if (response.approved) turn.approvals.push(input.detail);
     return {
       content: `${response.approved ? "User approved" : "User denied"}: ${input.action}`,
       isError: false,
@@ -345,9 +400,6 @@ export class CoordinatorAgent {
       id: randomUUID(),
       directive: this.state.currentDirective,
       report: this.state.report,
-      events: this.state.events,
-      resolvedInteractions: this.state.resolvedInteractions,
-      conversationHistory: this.state.conversationHistory,
       completedAt: new Date().toISOString(),
     });
     if (this.state.completedTurns.length > MAX_COMPLETED_TURNS) {

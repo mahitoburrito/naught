@@ -134,7 +134,7 @@ app.whenReady().then(async () => {
   createWindow();
 
   // The Claude-backed workspace coordinator talks to the embedded server
-  initCoordinatorAgent(mainWindow!, serverPort);
+  initCoordinatorAgent(() => mainWindow, serverPort);
 
   if (autoUpdateEnabled && process.platform === "darwin") {
     // electron-updater can't install into an unsigned mac app — use our

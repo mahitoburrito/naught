@@ -81,7 +81,7 @@ export function createCoordinatorTools(options: CoordinatorToolsOptions): Coordi
     {
       name: "read_session_output",
       description:
-        "Read the last part of a session's raw terminal output. Use it only when get_session_activity is not enough, for example to see an agent's latest reply verbatim.",
+        "Read the last part of a session's persisted terminal output (it can lag the live terminal by up to ten seconds). Use it only when get_session_activity is not enough, for example to see an agent's latest reply verbatim.",
       params: [{ name: "sessionId", description: "Exact session ID", required: true }],
       handler: async (input) => {
         // The id names a file under the buffers dir; never let it walk out of it.
@@ -113,7 +113,7 @@ export function createCoordinatorTools(options: CoordinatorToolsOptions): Coordi
     {
       name: "record_decision",
       description:
-        "Record a durable, versioned decision shared across the workspace. Call it when several agents need the same conclusion. If the topic already has an active decision, pass its exact ID as supersedes.",
+        "Record a durable, versioned decision shared across the workspace. Call it when several agents need the same conclusion. Requires a prior approved request_confirmation whose detail is exactly this choice. If the topic already has an active decision, pass its exact ID as supersedes.",
       params: [
         { name: "topic", description: "Stable decision topic", required: true },
         { name: "choice", description: "The chosen direction", required: true },
@@ -143,7 +143,7 @@ export function createCoordinatorTools(options: CoordinatorToolsOptions): Coordi
     {
       name: "send_directive",
       description:
-        "Queue a directive for one exact session. Delivery happens only while that agent is idle and stays unconfirmed until acknowledged. Never pass a display title as the target; use the session ID.",
+        "Queue a directive for one exact coding-agent session. Requires a prior approved request_confirmation whose detail is exactly this text. Delivery happens only while that agent is idle and stays unconfirmed until acknowledged. Never pass a display title as the target; use the session ID.",
       params: [
         { name: "sessionId", description: "Exact target session ID", required: true },
         { name: "text", description: "Concise directive for the worker agent", required: true },
@@ -151,6 +151,11 @@ export function createCoordinatorTools(options: CoordinatorToolsOptions): Coordi
         { name: "clientRequestId", description: "Optional stable idempotency key for retry safety", required: false },
       ],
       handler: async (input, signal) => {
+        // A directive is pasted and submitted into the target's terminal; a
+        // plain shell would run every line as a command.
+        if (await isPlainShell(input.sessionId, signal)) {
+          throw new Error(`Directive was not queued: session ${input.sessionId} is a plain shell, not a coding agent`);
+        }
         try {
           return await request("/api/coordinator/directives", {
             method: "POST",
@@ -204,10 +209,24 @@ export function createCoordinatorTools(options: CoordinatorToolsOptions): Coordi
     },
   ];
 
+  // Only refuses when the session list is readable and names the target as a
+  // shell; anything else is left to the server's own validation.
+  async function isPlainShell(sessionId: string, signal?: AbortSignal): Promise<boolean> {
+    try {
+      const response = await doFetch(`${base}/api/sessions`, { signal });
+      const sessions: unknown = await response.json();
+      if (!Array.isArray(sessions)) return false;
+      const target = sessions.find((s) => s && typeof s === "object" && (s as any).sessionId === sessionId);
+      return !!target && (target as any).agentId === "shell";
+    } catch {
+      return false;
+    }
+  }
+
+  // Inputs are tiny, so the API's buffered validation beats eager streaming.
   const definitions: Anthropic.Beta.BetaTool[] = specs.map((spec) => ({
     name: spec.name,
     description: spec.description,
-    eager_input_streaming: true,
     input_schema: {
       type: "object",
       properties: Object.fromEntries(

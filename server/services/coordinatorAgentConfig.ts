@@ -1,6 +1,6 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
-import { homedir } from "os";
+import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "fs";
 import { join } from "path";
+import { getDataDir } from "./persistence";
 
 /** Settings for the Claude-backed workspace coordinator agent. */
 export interface CoordinatorAgentConfig {
@@ -19,16 +19,13 @@ export interface CoordinatorCredentials {
 
 export const DEFAULT_COORDINATOR_MODEL = "claude-opus-5";
 
-function defaultLaunchCwd(): string {
-  return process.env.LAUNCH_CWD || homedir();
+/** The config sits in the app's data dir (OPENUI_DATA_DIR, else ~/.openui-desktop). */
+export function coordinatorAgentConfigPath(dataDir: string = getDataDir()): string {
+  return join(dataDir, "coordinator-agent.json");
 }
 
-export function coordinatorAgentConfigPath(launchCwd: string = defaultLaunchCwd()): string {
-  return join(launchCwd, ".openui-desktop", "coordinator-agent.json");
-}
-
-export function loadCoordinatorAgentConfig(launchCwd: string = defaultLaunchCwd()): CoordinatorAgentConfig {
-  const file = coordinatorAgentConfigPath(launchCwd);
+export function loadCoordinatorAgentConfig(dataDir: string = getDataDir()): CoordinatorAgentConfig {
+  const file = coordinatorAgentConfigPath(dataDir);
   if (!existsSync(file)) return {};
   try {
     const raw = JSON.parse(readFileSync(file, "utf-8")) as Record<string, unknown>;
@@ -42,16 +39,17 @@ export function loadCoordinatorAgentConfig(launchCwd: string = defaultLaunchCwd(
   }
 }
 
-export function saveCoordinatorAgentConfig(
-  config: CoordinatorAgentConfig,
-  launchCwd: string = defaultLaunchCwd(),
-): void {
-  const dir = join(launchCwd, ".openui-desktop");
-  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+/** Writes the key owner-only and atomically, so a crash mid-write cannot lose it. */
+export function saveCoordinatorAgentConfig(config: CoordinatorAgentConfig, dataDir: string = getDataDir()): void {
+  if (!existsSync(dataDir)) mkdirSync(dataDir, { recursive: true, mode: 0o700 });
   const stored: CoordinatorAgentConfig = {};
   if (config.apiKey) stored.apiKey = config.apiKey;
   if (config.model) stored.model = config.model;
-  writeFileSync(coordinatorAgentConfigPath(launchCwd), JSON.stringify(stored, null, 2));
+  const file = coordinatorAgentConfigPath(dataDir);
+  const temp = `${file}.${process.pid}.${Date.now()}.tmp`;
+  writeFileSync(temp, JSON.stringify(stored, null, 2), { mode: 0o600 });
+  chmodSync(temp, 0o600);
+  renameSync(temp, file);
 }
 
 /** A key saved in Settings wins over ANTHROPIC_API_KEY in the environment. */

@@ -17,14 +17,16 @@ import type { InteractionResponse } from "./coordinatorAgentTypes";
 
 const NO_KEY_MESSAGE = "Add an Anthropic API key in Settings → Integrations → Coordination to use the coordinator.";
 
-let mainWindowRef: BrowserWindow | null = null;
+let getWindow: () => BrowserWindow | null = () => null;
 let agent: CoordinatorAgent | null = null;
 let agentApiKey: string | null = null;
 let agentModel: string | null = null;
 
+// Resolved per call: macOS recreates the window on dock activation.
 function send(channel: string, payload: unknown) {
-  if (mainWindowRef && !mainWindowRef.isDestroyed()) {
-    mainWindowRef.webContents.send(channel, payload);
+  const window = getWindow();
+  if (window && !window.isDestroyed()) {
+    window.webContents.send(channel, payload);
   }
 }
 
@@ -51,8 +53,8 @@ function getAgent(serverPort: number): CoordinatorAgent | { error: string } {
   return agent;
 }
 
-export function initCoordinatorAgent(mainWindow: BrowserWindow, serverPort: number) {
-  mainWindowRef = mainWindow;
+export function initCoordinatorAgent(windowGetter: () => BrowserWindow | null, serverPort: number) {
+  getWindow = windowGetter;
 
   ipcMain.handle("coordinator-agent:is-available", async () => {
     const credentials = resolveCoordinatorCredentials(loadCoordinatorAgentConfig());
