@@ -1,6 +1,5 @@
 import { BrowserWindow, ipcMain } from "electron";
 import Anthropic from "@anthropic-ai/sdk";
-import { homedir } from "os";
 import {
   DEFAULT_COORDINATOR_MODEL,
   loadCoordinatorAgentConfig,
@@ -44,7 +43,7 @@ function getAgent(serverPort: number): CoordinatorAgent | { error: string } {
   agent = new CoordinatorAgent({
     client: new Anthropic({ apiKey: credentials.apiKey }),
     model,
-    tools: createCoordinatorTools({ serverPort, launchCwd: process.env.LAUNCH_CWD || homedir() }),
+    tools: createCoordinatorTools({ serverPort }),
     onState: (state) => send("coordinator-agent:state", state),
     onInteraction: (payload) => send("coordinator-agent:interaction", payload),
   });

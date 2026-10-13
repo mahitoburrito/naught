@@ -50,7 +50,13 @@ console.log("\ncoordinatorTools");
   const { createCoordinatorTools, INTERACTION_TOOL_NAMES } = await import(join(dist, "electron", "coordinatorTools.js"));
   const dir = mkdtempSync(join(tmpdir(), "coord-tools-"));
   mkdirSync(join(dir, ".openui-desktop", "buffers"), { recursive: true });
-  writeFileSync(join(dir, ".openui-desktop", "buffers", "s1.txt"), "hello");
+  // The app persists scrollback as JSON envelopes (and migrates legacy .txt files);
+  // the tool must read them through the same loader the app uses.
+  process.env.LAUNCH_CWD = dir;
+  delete process.env.OPENUI_DATA_DIR;
+  writeFileSync(join(dir, ".openui-desktop", "buffers", "s1.json"), JSON.stringify({ version: 2, savedAt: Date.now(), truncated: false, data: "hello" }));
+  writeFileSync(join(dir, ".openui-desktop", "buffers", "legacy.txt"), "old scrollback");
+  writeFileSync(join(dir, ".openui-desktop", "buffers", "big.json"), JSON.stringify({ version: 2, savedAt: Date.now(), truncated: false, data: "x".repeat(20_000) + "END" }));
 
   const calls = [];
   const routes = {
@@ -61,6 +67,7 @@ console.log("\ncoordinatorTools");
     "POST /api/coordinator/decisions": { status: 201, body: { id: "dec-1" } },
     "POST /api/coordinator/directives": { status: 201, body: { id: "dir-1", state: "queued" } },
     "POST /api/coordinator/directives/d-missing/acknowledge": { status: 404, body: { error: "directive not found" } },
+    "GET /api/sessions/huge/status": { status: 200, body: { log: "y".repeat(50_000) } },
   };
   const fakeFetch = async (url, init = {}) => {
     const method = init.method || "GET";
@@ -69,7 +76,7 @@ console.log("\ncoordinatorTools");
     const route = routes[`${method} ${path}`] || { status: 404, body: { error: `no route ${method} ${path}` } };
     return { ok: route.status < 400, status: route.status, json: async () => route.body };
   };
-  const tools = createCoordinatorTools({ serverPort: 7000, launchCwd: dir, fetch: fakeFetch });
+  const tools = createCoordinatorTools({ serverPort: 7000, fetch: fakeFetch });
   const last = () => calls[calls.length - 1];
 
   check("ten tool definitions in a stable order", tools.definitions.map((t) => t.name), [
@@ -98,7 +105,12 @@ console.log("\ncoordinatorTools");
   check("missing required field is an error result", await tools.run("get_session_status", {}), { content: "Invalid input for get_session_status: missing required field sessionId", isError: true });
   check("non-string field is an error result", await tools.run("get_session_status", { sessionId: 5 }), { content: "Invalid input for get_session_status: field sessionId must be a string", isError: true });
   check("unknown tool", await tools.run("nope", {}), { content: "Unknown tool: nope", isError: true });
-  check("read_session_output tails the buffer", await tools.run("read_session_output", { sessionId: "s1" }), { content: "hello", isError: false });
+  check("read_session_output reads the app's JSON scrollback", await tools.run("read_session_output", { sessionId: "s1" }), { content: "hello", isError: false });
+  check("read_session_output reads a legacy .txt scrollback", await tools.run("read_session_output", { sessionId: "legacy" }), { content: "old scrollback", isError: false });
+  const big = await tools.run("read_session_output", { sessionId: "big" });
+  check("read_session_output keeps only the tail of a large scrollback", [big.content.startsWith("[truncated to last 5000 chars]"), big.content.endsWith("END"), big.content.length < 5100], [true, true, true]);
+  const huge = await tools.run("get_session_status", { sessionId: "huge" });
+  check("HTTP tool results are capped before reaching the model", [huge.isError, huge.content.length <= 20_100, /\[truncated: \d+ more characters\]$/.test(huge.content)], [false, true, true]);
   check("read_session_output with no buffer", await tools.run("read_session_output", { sessionId: "missing" }), { content: "(no output buffer found for this session)", isError: false });
   check("read_session_output rejects path-like ids", await tools.run("read_session_output", { sessionId: "../x" }), { content: "Invalid input for read_session_output: sessionId must be a plain session ID", isError: true });
   check("interaction tools are not run here", (await tools.run("ask_user", { question: "?" })).isError, true);
@@ -126,7 +138,7 @@ console.log("\ncoordinatorAgent");
     const route = routes[`${method} ${path}`] || { status: 404, body: { error: `no route ${method} ${path}` } };
     return { ok: route.status < 400, status: route.status, json: async () => route.body };
   };
-  const tools = createCoordinatorTools({ serverPort: 7000, launchCwd: dir, fetch: fakeFetch });
+  const tools = createCoordinatorTools({ serverPort: 7000, fetch: fakeFetch });
 
   // script entries: a Message, an Error to throw, or a function ({ params, opts }) => Promise<Message>
   function fakeClient(script) {
@@ -340,7 +352,7 @@ console.log("\ncoordinatorAgent");
       init.signal?.addEventListener("abort", () => { abortedFetches++; reject(Object.assign(new Error("aborted"), { name: "AbortError" })); });
       pending.push(() => resolve({ ok: true, status: 200, json: async () => [] }));
     });
-    const hangingTools = createCoordinatorTools({ serverPort: 7000, launchCwd: dir, fetch: hangingFetch });
+    const hangingTools = createCoordinatorTools({ serverPort: 7000, fetch: hangingFetch });
     const client = fakeClient([
       msg([toolUse("t", "list_active_sessions", {})], "tool_use"),
       msg([text("B done")], "end_turn"),
@@ -362,7 +374,7 @@ console.log("\ncoordinatorAgent");
   {
     const pending = [];
     const stubbornFetch = () => new Promise((resolve) => pending.push(() => resolve({ ok: true, status: 200, json: async () => [] })));
-    const stubbornTools = createCoordinatorTools({ serverPort: 7000, launchCwd: dir, fetch: stubbornFetch });
+    const stubbornTools = createCoordinatorTools({ serverPort: 7000, fetch: stubbornFetch });
     const client = fakeClient([
       msg([toolUse("t", "list_active_sessions", {})], "tool_use"),
       msg([text("B done")], "end_turn"),
@@ -424,7 +436,7 @@ console.log("\ncoordinatorAgent");
       if ((init.method || "GET") === "POST") posted.push(new URL(url).pathname);
       return { ok: true, status: 201, json: async () => ({ id: "dir-1", state: "queued" }) };
     };
-    const recordingTools = createCoordinatorTools({ serverPort: 7000, launchCwd: dir, fetch: recordingFetch });
+    const recordingTools = createCoordinatorTools({ serverPort: 7000, fetch: recordingFetch });
     const client = fakeClient([
       msg([
         toolUse("c1", "request_confirmation", { action: "send directive to s1", detail: "run the tests" }),

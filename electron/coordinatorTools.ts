@@ -1,6 +1,6 @@
-import { existsSync, readFileSync } from "fs";
-import { join } from "path";
 import type Anthropic from "@anthropic-ai/sdk";
+import { loadBuffer as loadPersistedBuffer } from "../server/services/persistence";
+import type { LoadedTerminalBuffer } from "../server/services/persistence";
 
 /**
  * The coordinator's tools. Eight act on the embedded OpenUI server over HTTP;
@@ -26,8 +26,9 @@ export interface CoordinatorTools {
 
 export interface CoordinatorToolsOptions {
   serverPort: number;
-  launchCwd: string;
   fetch?: typeof globalThis.fetch;
+  /** Reads a session's persisted scrollback; defaults to the app's own loader. */
+  loadBuffer?: (sessionId: string) => LoadedTerminalBuffer;
 }
 
 type StringParams = Record<string, string>;
@@ -41,9 +42,12 @@ interface ToolSpec {
 }
 
 const MAX_OUTPUT_CHARS = 5000;
+/** Cap on what one tool result feeds back into the model's context. */
+const MAX_RESULT_CHARS = 20_000;
 
 export function createCoordinatorTools(options: CoordinatorToolsOptions): CoordinatorTools {
   const doFetch = options.fetch ?? globalThis.fetch;
+  const loadBuffer = options.loadBuffer ?? loadPersistedBuffer;
   const base = `http://localhost:${options.serverPort}`;
 
   async function request(path: string, init?: RequestInit, signal?: AbortSignal): Promise<string> {
@@ -84,13 +88,12 @@ export function createCoordinatorTools(options: CoordinatorToolsOptions): Coordi
         if (/[\/\\]|\.\./.test(input.sessionId)) {
           throw new Error("Invalid input for read_session_output: sessionId must be a plain session ID");
         }
-        const bufferFile = join(options.launchCwd, ".openui-desktop", "buffers", `${input.sessionId}.txt`);
-        if (!existsSync(bufferFile)) return "(no output buffer found for this session)";
-        const content = readFileSync(bufferFile, "utf-8");
+        const content = loadBuffer(input.sessionId).chunks.join("");
+        if (!content) return "(no output buffer found for this session)";
         if (content.length > MAX_OUTPUT_CHARS) {
           return `[truncated to last ${MAX_OUTPUT_CHARS} chars]\n${content.slice(-MAX_OUTPUT_CHARS)}`;
         }
-        return content || "(empty output buffer)";
+        return content;
       },
     },
     {
@@ -241,13 +244,18 @@ export function createCoordinatorTools(options: CoordinatorToolsOptions): Coordi
       return { content: `${name} must be answered by the user; the agent handles it`, isError: true };
     }
     try {
-      return { content: await spec.handler(input as StringParams, runOptions?.signal), isError: false };
+      return { content: capResult(await spec.handler(input as StringParams, runOptions?.signal)), isError: false };
     } catch (e: any) {
       return { content: e?.message || String(e), isError: true };
     }
   }
 
   return { definitions, run };
+}
+
+function capResult(content: string): string {
+  if (content.length <= MAX_RESULT_CHARS) return content;
+  return `${content.slice(0, MAX_RESULT_CHARS)}\n[truncated: ${content.length - MAX_RESULT_CHARS} more characters]`;
 }
 
 /** Validate and type a tool input without running it (used by the agent for interaction tools). */

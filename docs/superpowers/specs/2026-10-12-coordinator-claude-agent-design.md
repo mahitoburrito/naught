@@ -67,7 +67,10 @@ launchCwd, fetch })` returns `{ definitions, run }`:
   here too but executed by the agent, because they block on the renderer.
 - `run(name, input)` validates the input against the schema (every `required`
   key present, every value a string) and returns `{ content, isError }`. Tool
-  failures become `is_error` tool results, never thrown.
+  failures become `is_error` tool results, never thrown. Results are capped at
+  20k characters before they reach the model. `read_session_output` reads the
+  session's persisted scrollback through the app's own `loadBuffer` (JSON
+  envelopes under the data dir, legacy `.txt` migrated), never raw files.
 
 ### `electron/coordinatorAgent.ts`
 
