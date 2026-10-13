@@ -139,7 +139,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           npm audit --omit=dev --audit-level=high
-          npm --prefix client audit --audit-level=high
+          npm --prefix client audit --omit=dev --audit-level=high
 
   version:
     needs: validate
