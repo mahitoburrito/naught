@@ -22,7 +22,7 @@ export const DEFAULT_COMPUTE_CONFIG: ComputeConfig = {
   },
   notifications: {
     to: undefined,
-    from: "Naught <naught@prbe.ai>",
+    from: "Naught <support@prbe.ai>",
     reminderHours: 4,
     idleAlertMinutes: 60,
   },

@@ -49,7 +49,7 @@ export function remoteTarCreateCommand(root = "/"): string {
 
 export function tarExtractCommand(root = "/"): string {
   // -p keeps modes; -f - reads the stream; parent directories are created by tar.
-  return `mkdir -p ${shellQuote(root)} && tar -C ${shellQuote(root)} -xzpf -`;
+  return `mkdir -p ${shellQuote(root)} && tar -C ${shellQuote(root)} --no-same-owner -xzpf -`;
 }
 
 export function deleteCommand(paths: string[], root = "/"): { command: string; input: Buffer } {

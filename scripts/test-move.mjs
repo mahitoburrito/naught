@@ -153,7 +153,7 @@ section("transfer");
   const transfer = await import(join(dist, "services", "move", "transfer.js"));
   check("tar member list strips the root", transfer.tarMemberList(["/a/b.txt", "/a/c/d.txt"]).toString(), "a/b.txt\0a/c/d.txt\0");
   check("tar member list keeps the whole path minus the leading slash", transfer.tarMemberList(["/scratch/a/b.txt"]).toString(), "scratch/a/b.txt\0");
-  check("extract command", transfer.tarExtractCommand("/"), "mkdir -p '/' && tar -C '/' -xzpf -");
+  check("extract command", transfer.tarExtractCommand("/"), "mkdir -p '/' && tar -C '/' --no-same-owner -xzpf -");
   check("delete command", [transfer.deleteCommand(["/a/x", "/a/y"]).command, transfer.deleteCommand(["/a/x"], "/r").input.toString()], ["xargs -0 rm -rf --", "/r/a/x\0"]);
 
   const box = { id: "b", name: "b", source: "provisioned", inSshConfig: false, host: "h", user: "root", port: 22, identityFile: "/k" };

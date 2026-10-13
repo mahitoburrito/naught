@@ -208,7 +208,7 @@ section("notifications");
       maxLifetimeHours: 8, lastActivityAt: now - 90 * 60_000, emails: { reminderCount: 0, idleAlertCount: 0 },
     },
   };
-  const config = { to: "me@prbe.ai", from: "Naught <naught@prbe.ai>", reminderHours: 4, idleAlertMinutes: 60 };
+  const config = { to: "me@prbe.ai", from: "Naught <support@prbe.ai>", reminderHours: 4, idleAlertMinutes: 60 };
   const calls = [];
   const fetchStub = async (url, init) => {
     calls.push({ url, init });
@@ -226,7 +226,7 @@ section("notifications");
   const req = calls[0];
   const body = JSON.parse(req.init.body);
   check("posted to Resend with the bearer and the idempotency key", [req.url, req.init.headers.Authorization, req.init.headers["Idempotency-Key"]], [notify.RESEND_EMAILS_URL, "Bearer re_x", "naught-node-abc-started"]);
-  check("from/to come from the settings", [body.from, body.to], ["Naught <naught@prbe.ai>", ["me@prbe.ai"]]);
+  check("from/to come from the settings", [body.from, body.to], ["Naught <support@prbe.ai>", ["me@prbe.ai"]]);
   check("subject names the node, the spec and the estimate", body.subject, "[Naught] gpu-1 is live: H100 · 4 vCPU · 16 GB at $3.95/hr est.");
   check("body says how to stop it", body.text.includes("naught node terminate node-abc") && body.text.includes("Settings → Devboxes") && body.text.includes("sess A"), true);
 

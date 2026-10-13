@@ -72,7 +72,7 @@ settled in conversation:
 | --- | --- | --- |
 | Policy defaults | 2 concurrent nodes, any GPU, 8 h max lifetime with auto-terminate, $5/hr per node | One H100 on Modal is $3.95/hr; anything multi-GPU goes to the approval sheet |
 | Recipient address default | `git config --global user.email` | The only address the machine knows; shown and editable in Settings |
-| Sender address default | `Naught <naught@prbe.ai>` | prbe.ai is already verified on the team's Resend account |
+| Sender address default | `Naught <support@prbe.ai>` | prbe.ai is already verified on the team's Resend account |
 | Modal base image | `ubuntu:22.04`, or `nvidia/cuda:12.4.0-devel-ubuntu22.04` when a GPU is requested | Matches the SDK's own examples; Modal caches the built image |
 | Thunder template default | `ubuntu-22.04`, with the live template list offered | The documented example value |
 | Node user | whatever the provider gives (`root` on Modal, `ubuntu` on Thunder) | Fighting it buys nothing |

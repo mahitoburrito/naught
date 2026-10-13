@@ -57,7 +57,8 @@
     "test:manifest": "bash scripts/test-manifest-py.sh",
     "test:move": "npm run build:electron && node scripts/test-move.mjs",
     "test:move:docker": "npm run build:electron && node scripts/test-move-docker.mjs",
-    "smoke:compute-live": "npm run build:electron && node scripts/smoke-compute-live.mjs"
+    "smoke:compute-live": "npm run build:electron && node scripts/smoke-compute-live.mjs",
+    "smoke:move-live": "npm run build:electron && node scripts/smoke-move-live.mjs"
   },
   "dependencies": {
     "@hono/node-server": "^2.0.8",
