@@ -245,6 +245,7 @@ section("move state machine");
   let now = 1_000_000;
   let pushFailures = 0;
   let relaunched = [];
+  let remoteLaunchResult = { state: "remote" };
   move.configureMoves({
     sessions: () => sessions,
     now: () => (now += 10),
@@ -280,6 +281,7 @@ section("move state machine");
     },
     write: (sessionId, data) => { calls.push(["write", data]); const s = sessions.get(sessionId); setTimeout(() => { s.pty = null; s.status = "disconnected"; }, 20); },
     terminalPhase: () => "at_prompt",
+    remoteLaunch: () => (remoteLaunchResult),
     persist: () => { if (session.move && states.at(-1) !== `${session.move.direction}:${session.move.state}`) states.push(`${session.move.direction}:${session.move.state}`); },
     terminateNode: async (nodeId, reason) => { calls.push(["terminateNode", nodeId, reason]); },
     timing: { pollMs: 5, idleTimeoutMs: 2000, quiesceMs: 500, verifyMs: 800 },
@@ -344,6 +346,35 @@ section("move state machine");
   result = await settled();
   check("overwrite pulls the differing file and finishes", [overwrite.status, result.state, calls.filter((c) => c[0] === "pull")[0], readFileSync(join(repo, "tracked.txt"), "utf-8")], [202, "done", ["pull", 1], "tracked\n"]);
   check("terminateNode false keeps the node", calls.some((c) => c[0] === "terminateNode"), false);
+
+  // A relaunch that never reaches the node must fail the move, not pass on a local prompt.
+  remoteLaunchResult = { state: "failed", error: "could not reach gpu-1: ssh exited (see the terminal)" };
+  session.move = { ...session.move, state: "done", direction: "home" };
+  session.devboxId = undefined;
+  states.length = 0; relaunched = [];
+  move.configureMoves({ transfer: { pull: async () => {} } });
+  await move.startMove("s1", { nodeId: "node-1", whenIdle: false });
+  result = await settled();
+  check("a launch that never reached the node fails the move at verify", [result.state, result.failedStep, result.error], ["error", "verify", "could not reach gpu-1: ssh exited (see the terminal)"]);
+  remoteLaunchResult = { state: "remote" };
+  await move.retryMove("s1");
+  result = await settled();
+  check("retry after the node is reachable completes", result.state, "done");
+  check("retrying a failed verify relaunches", relaunched.length, 2);
+
+  // A shell session that never reports idle must not park a move in waiting-idle.
+  {
+    const shellSession = { ...session, agentId: "shell", command: "", claudeSessionId: undefined, status: "running", pty: makePty(), devboxId: undefined, move: undefined };
+    sessions.set("s2", shellSession);
+    states.length = 0; relaunched = [];
+    remoteManifest = null;
+    move.configureMoves({ sessions: () => sessions });
+    await move.startMove("s2", { nodeId: "node-1" });
+    let shellResult;
+    for (let i = 0; i < 400; i++) { if (["done", "error"].includes(shellSession.move?.state)) { shellResult = shellSession.move; break; } await new Promise((r) => setTimeout(r, 10)); }
+    check("a busy-looking shell session moves without waiting for idle", [shellResult?.state, shellResult?.error], ["done", undefined]);
+    sessions.delete("s2");
+  }
 
   // Restart recovery.
   session.move = { ...session.move, state: "sync-files", direction: "out" };

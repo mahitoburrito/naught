@@ -39,6 +39,14 @@ const TABS: { id: SettingsTab; label: string; icon: LucideIcon }[] = [
 
 export function SettingsModal({ open, onClose }: SettingsModalProps) {
   const [tab, setTab] = useState<SettingsTab>("general");
+  // Other surfaces (the live-nodes pill) open Settings on a specific tab.
+  const requestedTab = useStore((state) => state.settingsTab);
+  const setRequestedTab = useStore((state) => state.setSettingsTab);
+  useEffect(() => {
+    if (!open || !requestedTab) return;
+    setTab(requestedTab as SettingsTab);
+    setRequestedTab(undefined);
+  }, [open, requestedTab, setRequestedTab]);
   const [apiKey, setApiKey] = useState("");
   const [hasExistingKey, setHasExistingKey] = useState(false);
   const [isValidating, setIsValidating] = useState(false);

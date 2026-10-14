@@ -476,6 +476,12 @@ class TerminalRemoteManager {
     return this.sessions.get(sessionId)?.hookPort;
   }
 
+  hookPorts(): Set<number> {
+    const ports = new Set<number>();
+    for (const session of this.sessions.values()) if (session.hookPort) ports.add(session.hookPort);
+    return ports;
+  }
+
   async run(sessionId: string, request: TerminalRemoteRunRequest): Promise<TerminalRemoteRunResult> {
     const session = this.sessions.get(sessionId);
     const connection = session?.connection;

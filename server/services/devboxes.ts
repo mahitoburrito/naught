@@ -176,7 +176,9 @@ export function buildDevboxLaunch(
     parts.push(`export OPENUI_HOST=127.0.0.1 OPENUI_PORT=${options.hooks.port} OPENUI_SESSION_ID=${quoteForRemoteShell(options.hooks.sessionId)}`);
   }
   const trimmed = agentCommand.trim();
-  parts.push(`exec ${trimmed ? withRemotePluginDir(trimmed) : "$SHELL -l"}`);
+  // A shell session stays in the instrumented remote shell (exec'ing a new
+  // login shell would drop cwd tracking, file access and git for the card).
+  if (trimmed) parts.push(`exec ${withRemotePluginDir(trimmed)}`);
   return {
     launch: `ssh ${target}`,
     remote: parts.join("; "),

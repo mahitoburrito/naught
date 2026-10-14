@@ -32,7 +32,7 @@ import {
 } from "./move/harness";
 import { deleteLocal, deleteRemote, ensureRemoteDirectory, pullFiles, pushFiles, type TransferDeps } from "./move/transfer";
 import { saveState } from "./persistence";
-import { getTerminalSnapshot, relaunchSession, sessions as liveSessions, writeTerminalData } from "./sessionManager";
+import { getTerminalSnapshot, relaunchSession, remoteLaunchState, sessions as liveSessions, writeTerminalData } from "./sessionManager";
 
 /**
  * Moving a session to a node and back. A persisted step machine: every step
@@ -70,6 +70,7 @@ export interface MoveDeps {
   relaunch: typeof relaunchSession;
   write: (sessionId: string, data: string) => void;
   terminalPhase: (sessionId: string) => string | undefined;
+  remoteLaunch: (sessionId: string) => { state: "pending" | "remote" | "failed"; error?: string } | undefined;
   persist: () => void;
   terminateNode: (nodeId: string, reason: "bring-back") => Promise<unknown>;
   requestNode: typeof requestNode;
@@ -90,6 +91,7 @@ let deps: MoveDeps = {
   relaunch: relaunchSession,
   write: (sessionId, data) => { writeTerminalData(sessionId, data, { kind: "automation", bracketedPaste: true, submit: true }); },
   terminalPhase: (sessionId) => getTerminalSnapshot(sessionId, false)?.phase,
+  remoteLaunch: (sessionId) => remoteLaunchState(sessionId),
   persist: () => saveState(liveSessions),
   terminateNode: (nodeId, reason) => terminateNode(nodeId, reason),
   requestNode,
@@ -398,7 +400,9 @@ async function outStep(step: MoveStep, ctx: MoveContext): Promise<void> {
   const move = session.move!;
   switch (step) {
     case "waiting-idle": {
-      await waitForIdle(session);
+      // A plain shell has no turns to finish, and its inferred status rarely
+      // settles to idle over ssh; waiting would park the move indefinitely.
+      if (move.harness.kind !== "shell") await waitForIdle(session);
       return;
     }
     case "prepare": {
@@ -496,6 +500,17 @@ async function syncAgentOut(ctx: MoveContext): Promise<void> {
 async function verifyLaunch(ctx: MoveContext, harness: MoveHarness): Promise<void> {
   const { session, sessionId } = ctx;
   const started = deps.now();
+  if (session.devboxId) {
+    // First prove the shell is on the node at all: a failed ssh leaves the
+    // card on a local prompt that would otherwise pass every check below.
+    for (;;) {
+      const remote = deps.remoteLaunch(sessionId);
+      if (remote?.state === "remote") break;
+      if (remote?.state === "failed") throw new Error(remote.error || "the session never reached the node");
+      if (deps.now() - started > deps.timing.verifyMs) throw new Error("the remote shell did not come up in time");
+      await sleep(deps.timing.pollMs);
+    }
+  }
   while (deps.now() - started < deps.timing.verifyMs) {
     if (!session.pty) throw new Error(`the relaunched process exited (${lastLines(session)})`);
     if (harness.kind === "claude" && session.claudeSessionId === harness.sessionId) return;
@@ -525,7 +540,9 @@ async function homeStep(step: MoveStep, ctx: MoveContext): Promise<void> {
   const move = session.move!;
   switch (step) {
     case "waiting-idle": {
-      await waitForIdle(session);
+      // A plain shell has no turns to finish, and its inferred status rarely
+      // settles to idle over ssh; waiting would park the move indefinitely.
+      if (move.harness.kind !== "shell") await waitForIdle(session);
       return;
     }
     case "prepare": {
@@ -739,7 +756,9 @@ export async function retryMove(sessionId: string): Promise<MoveState> {
   const move = session.move;
   if (!move || move.state !== "error") throw new MoveError("Nothing to retry.", 400);
   const from = move.failedStep ?? "prepare";
-  void runPipeline(sessionId, from === "waiting-idle" ? "waiting-idle" : from);
+  // A failed verify means the launch itself did not take; checking it again
+  // would only fail again, so relaunch.
+  void runPipeline(sessionId, from === "verify" ? "relaunch" : from);
   return session.move!;
 }
 

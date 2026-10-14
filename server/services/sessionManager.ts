@@ -364,6 +364,14 @@ export function planSessionLaunch(sessionId: string, session: Session): SessionL
 const REMOTE_READY_POLL_MS = 200;
 const REMOTE_READY_TIMEOUT_MS = 12_000;
 
+export type RemoteLaunchState = "pending" | "remote" | "failed";
+const remoteLaunchStates = new Map<string, { state: RemoteLaunchState; error?: string }>();
+
+/** Whether the last devbox launch of this session actually reached the remote shell. */
+export function remoteLaunchState(sessionId: string): { state: RemoteLaunchState; error?: string } | undefined {
+  return remoteLaunchStates.get(sessionId);
+}
+
 /**
  * Waits for the ssh shim to report the remote shell (connected, or fallen
  * back to a plain shell) and then types the agent command there. Resolves
@@ -376,19 +384,39 @@ export function dispatchRemoteLaunch(
   remote: NonNullable<SessionLaunchPlan["remote"]>,
 ): Promise<boolean> {
   const startedAt = Date.now();
+  remoteLaunchStates.set(sessionId, { state: "pending" });
   return new Promise((resolve) => {
     const attempt = () => {
       if (sessions.get(sessionId) !== session || session.pty !== ptyProcess) {
+        remoteLaunchStates.set(sessionId, { state: "failed", error: "the terminal went away before the remote shell was up" });
         resolve(false);
         return;
       }
       const state = terminalRemoteManager.snapshot(sessionId)?.state;
       const elapsed = Date.now() - startedAt;
+      // The ssh command still running means a remote shell is on the other
+      // end even when the shim did not instrument it. A finished one means
+      // ssh failed and we are back at the LOCAL prompt: typing the agent
+      // command there would run it on this machine, so stop instead.
+      // Once the shim reports a connection in progress, the prompt we see is
+      // the node's own shell; only with no remote state at all can a prompt
+      // mean we are back on this machine.
+      const remoteInProgress = state === "connecting" || state === "initializing" || state === "reconnecting";
+      const phase = getTerminalSnapshot(sessionId, false)?.phase;
+      const sshExited = !remoteInProgress && elapsed > 1_500 && (phase === "at_prompt" || phase === "awaiting_prompt");
+      if (state !== "connected" && state !== "fallback" && sshExited) {
+        const error = `could not reach ${remote.devbox.name}: ssh exited (see the terminal)`;
+        remoteLaunchStates.set(sessionId, { state: "failed", error });
+        logError(`[devbox] ${sessionId}: ${error}`);
+        resolve(false);
+        return;
+      }
       const settled = state === "connected" || state === "fallback" || elapsed >= REMOTE_READY_TIMEOUT_MS;
       if (!settled) {
         setTimeout(attempt, REMOTE_READY_POLL_MS);
         return;
       }
+      remoteLaunchStates.set(sessionId, { state: "remote" });
       const port = terminalRemoteManager.hookPort(sessionId);
       const launch = buildDevboxLaunch(remote.devbox, remote.agentCommand, remote.remotePath, {
         hooks: port ? { port, sessionId } : undefined,
@@ -1285,6 +1313,26 @@ function getTerminalResourceRoot(): string | null {
   ) || null;
 }
 
+/**
+ * Where ssh control sockets live. A unix socket path is capped at 104 bytes on
+ * macOS, and ssh appends a 17-character temporary suffix while creating the
+ * master. The per-user TMPDIR there (/var/folders/xx/.../T/, ~49 bytes) leaves
+ * too little room, so the master failed and every instrumented ssh fell back
+ * to a plain one. A short owner-only directory under /tmp stays well inside.
+ */
+export function sshControlDirectoryPrefix(safeId: string, platform: NodeJS.Platform = process.platform, base: string = tmpdir()): string {
+  const uid = typeof process.getuid === "function" ? process.getuid() : 0;
+  const root = platform === "darwin" || base.length > 24 ? "/tmp" : base;
+  return join(root, `nssh-${uid}-${safeId.slice(0, 6)}-`);
+}
+
+export function stripShimDirectories(pathValue: string): string {
+  return pathValue
+    .split(delimiter)
+    .filter((directory) => directory && !/[\\/]runtime-shell-shims[\\/]/.test(`${directory}/`))
+    .join(delimiter);
+}
+
 function executableOnPath(name: string, pathValue: string): string | null {
   for (const directory of pathValue.split(delimiter)) {
     if (!directory) continue;
@@ -1443,7 +1491,10 @@ export function prepareShellShimEnvironment(
     return {};
   }
 
-  const originalPath = baseEnvironment.PATH || process.env.PATH || "/usr/local/bin:/usr/bin:/bin";
+  // A Naught started from inside a Naught session inherits that session's shim
+  // directory on PATH. Resolving through it would make the outer shim this
+  // session's "real" ssh, and the nested wrappers then refuse to run.
+  const originalPath = stripShimDirectories(baseEnvironment.PATH || process.env.PATH || "/usr/local/bin:/usr/bin:/bin");
   const subshellPolicies = loadSubshellPolicies(home);
   let created = 0;
 
@@ -1625,7 +1676,7 @@ export function prepareShellShimEnvironment(
   let remoteEnvironment: Record<string, string> = {};
   if (realSsh && resourceRoot && remoteAssetVersion && isAbsolute(process.execPath)) {
     try {
-      const controlDirectory = mkdtempSync(join(tmpdir(), `openui-ssh-${safeId.slice(0, 8)}-`));
+      const controlDirectory = mkdtempSync(sshControlDirectoryPrefix(safeId));
       chmodSync(controlDirectory, 0o700);
       const token = randomBytes(32).toString("hex");
       const wrapper = join(resourceRoot, "remote-terminal", "openui_ssh_wrapper.cjs");

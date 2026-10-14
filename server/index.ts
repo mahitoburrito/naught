@@ -10,6 +10,7 @@ import { prbeRoutes } from "./routes/prbe";
 import { coordinatorRoutes } from "./routes/coordinator";
 import { devboxRoutes } from "./routes/devboxes";
 import { computeRoutes } from "./routes/compute";
+import { terminalRemoteManager } from "./services/terminalRemote";
 import { moveRoutes } from "./routes/move";
 import { resumeInFlightMoves } from "./services/sessionMove";
 import { reconcileNodes, startNodeTicker } from "./services/compute/nodes";
@@ -46,6 +47,20 @@ function loopbackHost(value: string | undefined, port: number): boolean {
   return value === `localhost:${port}` || value === `127.0.0.1:${port}`;
 }
 
+/**
+ * Requests from a node arrive through the session's reverse tunnel with the
+ * node-side port in their Host header. Accept them only on a port the remote
+ * manager actually allocated, and only for what a node legitimately calls:
+ * status hooks, the compute API and session moves (the `naught` CLI).
+ */
+const NODE_TUNNEL_PATHS = [/^\/api\/status-update$/, /^\/api\/compute\//, /^\/api\/sessions\/[^/]+\/move(\/.*)?$/];
+
+export function nodeTunnelRequest(host: string | undefined, path: string, ports: Set<number> = terminalRemoteManager.hookPorts()): boolean {
+  const match = /^127\.0\.0\.1:(\d{1,5})$/.exec(host || "");
+  if (!match || !ports.has(Number(match[1]))) return false;
+  return NODE_TUNNEL_PATHS.some((pattern) => pattern.test(path));
+}
+
 function trustedBrowserOrigin(value: string | undefined, port: number): boolean {
   if (!value) return true;
   try {
@@ -63,7 +78,7 @@ function trustedBrowserOrigin(value: string | undefined, port: number): boolean 
 // Hono app for HTTP routes
 const app = new Hono();
 app.use("*", async (c, next) => {
-  if (!loopbackHost(c.req.header("host"), boundPort)) {
+  if (!loopbackHost(c.req.header("host"), boundPort) && !nodeTunnelRequest(c.req.header("host"), c.req.path)) {
     return c.json({ error: "Invalid local Host header" }, 403);
   }
   if (!trustedBrowserOrigin(c.req.header("origin"), boundPort)) {

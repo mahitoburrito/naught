@@ -443,7 +443,7 @@ function MoveSheetDialog({ direction, sessionId, sessionName, devboxName, cwd, o
                       <div className="flex items-start gap-2 text-xs text-zinc-300">
                         <GitBranch className="mt-0.5 h-3.5 w-3.5 flex-shrink-0 text-zinc-500" aria-hidden />
                         <span>
-                          Mother repo <span className="font-mono">.git</span> included
+                          Git history (<span className="font-mono">.git</span>) included
                         </span>
                       </div>
                     )}
