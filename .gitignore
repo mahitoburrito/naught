@@ -6,7 +6,6 @@ client/node_modules/
 *.js.map
 .openui-desktop/
 .env
-resources/default-config.json
 .gstack/
 test-results/
 release-staged/

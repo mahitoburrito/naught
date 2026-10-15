@@ -4,28 +4,13 @@ import { existsSync, readFileSync } from "fs";
 import { startServer } from "../server/index";
 import { getActiveSessionCount } from "../server/services/sessionManager";
 import { autoUpdater } from "electron-updater";
-import { initPRBE, cleanupPRBE } from "./prbe";
+import { initCoordinatorAgent, cleanupCoordinatorAgent } from "./coordinatorAgentIpc";
 import { destroyBrowserView, registerBrowserViewIpc } from "./browserView";
 import { startMacAutoUpdater, installPendingUpdateOnQuit } from "./macUpdater";
 import { safeWebNavigationUrl } from "./externalNavigation";
 import { destroyClipboardIpc, registerClipboardIpc } from "./clipboard";
 import { destroyNativeDialogIpc, registerNativeDialogIpc } from "./nativeDialog";
 
-// Load built-in default config (bundled API keys for production)
-function loadDefaultConfig() {
-  try {
-    const configPath = join(app.getAppPath(), "resources", "default-config.json");
-    if (existsSync(configPath)) {
-      const config = JSON.parse(readFileSync(configPath, "utf-8"));
-      if (config.prbeApiKey && !process.env.PRBE_API_KEY) {
-        process.env.PRBE_API_KEY = config.prbeApiKey;
-      }
-    }
-  } catch (e) {
-    // Default config not available — user can still configure manually
-  }
-}
-loadDefaultConfig();
 
 let mainWindow: BrowserWindow | null = null;
 let serverPort = Number(process.env.PORT) || 6968;
@@ -139,8 +124,7 @@ app.whenReady().then(async () => {
     serverPort = await startServer();
     console.log(`[electron] Server started on port ${serverPort}`);
   } catch (err) {
-    // Probe Agent Error Log Trigger
-    console.error("[PRBE_ERROR_5di1QF] [electron] Failed to start server:", err);
+    console.error("[electron] Failed to start server:", err);
     dialog.showErrorBox(
       "Server Error",
       "Failed to start the embedded server. The application may not work correctly."
@@ -149,8 +133,8 @@ app.whenReady().then(async () => {
 
   createWindow();
 
-  // Initialize PRBE debug agent
-  initPRBE(mainWindow!, serverPort);
+  // The Claude-backed workspace coordinator talks to the embedded server
+  initCoordinatorAgent(() => mainWindow, serverPort);
 
   if (autoUpdateEnabled && process.platform === "darwin") {
     // electron-updater can't install into an unsigned mac app — use our
@@ -179,13 +163,11 @@ app.whenReady().then(async () => {
     });
 
     autoUpdater.on("error", (err) => {
-      // Probe Agent Error Log Trigger
-      console.error("[PRBE_ERROR_2BweaS] [updater] Error:", err.message);
+      console.error("[updater] Error:", err.message);
     });
 
     autoUpdater.checkForUpdates().catch((err) => {
-      // Probe Agent Error Log Trigger
-      console.error("[PRBE_ERROR_uzkINF] [updater] Check failed:", err.message);
+      console.error("[updater] Check failed:", err.message);
     });
   }
 
@@ -205,7 +187,7 @@ app.on("will-quit", () => {
   destroyBrowserView();
   destroyClipboardIpc();
   destroyNativeDialogIpc();
-  cleanupPRBE();
+  cleanupCoordinatorAgent();
   installPendingUpdateOnQuit();
   process.emit("SIGINT" as any);
 });

@@ -389,7 +389,7 @@ async function startSessionFromApiInput(
         );
         launchCheckpoint = summarizeCheckpoint(checkpoint);
       } catch (checkpointError: any) {
-        logError(`[PRBE_ERROR_launchCheckpoint] [api] launch checkpoint failed (session=${sessionId}): ${checkpointError.message}`);
+        logError(`[api] launch checkpoint failed (session=${sessionId}): ${checkpointError.message}`);
       }
     },
   });
@@ -1617,7 +1617,7 @@ apiRoutes.post("/checkpoints", async (c) => {
     const checkpoint = await createGitCheckpoint(root, name);
     return c.json({ root, checkpoint: summarizeCheckpoint(checkpoint) });
   } catch (e: any) {
-    logError(`[PRBE_ERROR_checkpointCreate] [api] checkpoint create failed (repo=${root}): ${e.message}`);
+    logError(`[api] checkpoint create failed (repo=${root}): ${e.message}`);
     return c.json({ error: e.message || "Failed to create checkpoint" }, 500);
   }
 });
@@ -1640,7 +1640,7 @@ apiRoutes.post("/checkpoints/:checkpointId/restore", async (c) => {
     const checkpoint = await restoreGitCheckpoint(root, checkpointId);
     return c.json({ ok: true, root, checkpoint: summarizeCheckpoint(checkpoint) });
   } catch (e: any) {
-    logError(`[PRBE_ERROR_checkpointRestore] [api] checkpoint restore failed (repo=${root}, checkpoint=${checkpointId}): ${e.message}`);
+    logError(`[api] checkpoint restore failed (repo=${root}, checkpoint=${checkpointId}): ${e.message}`);
     return c.json({ error: e.message || "Failed to restore checkpoint" }, 500);
   }
 });
@@ -1692,7 +1692,7 @@ apiRoutes.get("/diff/files", async (c) => {
     const files = await getGitChangedFiles(root);
     return c.json({ root, branch, files });
   } catch (e: any) {
-    logError(`[PRBE_ERROR_diffLs] [api] git diff files failed (cwd=${root}): ${e.message}`);
+    logError(`[api] git diff files failed (cwd=${root}): ${e.message}`);
     return c.json({ error: e.message || "git diff failed" }, 500);
   }
 });
@@ -1714,7 +1714,7 @@ apiRoutes.get("/diff/summary", async (c) => {
     const files = await getGitChangedFiles(root);
     return c.json({ root, files, ...buildCommitMessage(files) });
   } catch (e: any) {
-    logError(`[PRBE_ERROR_diffSummary] [api] git diff summary failed (cwd=${root}): ${e.message}`);
+    logError(`[api] git diff summary failed (cwd=${root}): ${e.message}`);
     return c.json({ error: e.message || "git diff summary failed" }, 500);
   }
 });
@@ -1758,7 +1758,7 @@ apiRoutes.get("/diff/file", async (c) => {
     }
     return c.json({ file, diff });
   } catch (e: any) {
-    logError(`[PRBE_ERROR_diffFl] [api] git diff file failed (file=${fileQuery}): ${e.message}`);
+    logError(`[api] git diff file failed (file=${fileQuery}): ${e.message}`);
     return c.json({ error: e.message || "git diff failed" }, 500);
   }
 });
@@ -1800,7 +1800,7 @@ apiRoutes.post("/diff/discard", async (c) => {
     await discardGitFile(root, file!);
     return c.json({ ok: true, root, scope, file });
   } catch (e: any) {
-    logError(`[PRBE_ERROR_diffDiscard] [api] git discard failed (repo=${root}, file=${file || "*"}): ${e.message}`);
+    logError(`[api] git discard failed (repo=${root}, file=${file || "*"}): ${e.message}`);
     return c.json({ error: e.message || "Failed to discard changes" }, 500);
   }
 });
@@ -1830,7 +1830,7 @@ apiRoutes.post("/diff/discard-hunk", async (c) => {
     await discardGitHunk(root, file, hunkIndex);
     return c.json({ ok: true, root, file, hunkIndex });
   } catch (e: any) {
-    logError(`[PRBE_ERROR_diffDiscardHunk] [api] git hunk discard failed (repo=${root}, file=${file}, hunk=${hunkIndex}): ${e.message}`);
+    logError(`[api] git hunk discard failed (repo=${root}, file=${file}, hunk=${hunkIndex}): ${e.message}`);
     return c.json({ error: e.message || "Failed to reject hunk" }, 500);
   }
 });
@@ -2012,7 +2012,7 @@ apiRoutes.get("/sessions/changes", async (c) => {
         ...rootSummary,
       });
     } catch (e: any) {
-      logError(`[PRBE_ERROR_sessionChanges] [api] session changes failed (session=${sessionId}, cwd=${session.cwd}): ${e.message}`);
+      logError(`[api] session changes failed (session=${sessionId}, cwd=${session.cwd}): ${e.message}`);
     }
   }
 
@@ -3074,8 +3074,7 @@ apiRoutes.post("/sessions", async (c) => {
   try {
     return c.json(await startSessionFromApiInput(body));
   } catch (e: any) {
-    // Probe Agent Error Log Trigger
-    logError(`[PRBE_ERROR_acHsml] [api] Failed to create session: ${e.message}`);
+    logError(`[api] Failed to create session: ${e.message}`);
     if (e instanceof AgentProfileError) {
       const status = e.status === 404 ? 404 : e.status === 409 ? 409 : 400;
       return c.json({ error: e.message }, status);

@@ -39,9 +39,9 @@ import { MoveSheet } from "./components/move/MoveSheet";
 import type { MoveState } from "./types/compute";
 import { installRightDockExclusion } from "./stores/rightDock";
 import { getAgentAccentColor } from "./components/AgentIcon";
-import { PRBEPanel } from "./components/PRBEPanel";
-import { PRBEInteractionDialog } from "./components/PRBEInteractionDialog";
-import { usePRBEIPC } from "./hooks/usePRBEIPC";
+import { CoordinatorPanel } from "./components/CoordinatorPanel";
+import { CoordinatorInteractionDialog } from "./components/CoordinatorInteractionDialog";
+import { useCoordinatorAgentIPC } from "./hooks/useCoordinatorAgentIPC";
 import { useKeyboardShortcuts } from "./hooks/useKeyboardShortcuts";
 import { useDesktopNotifications } from "./hooks/useDesktopNotifications";
 import { destroyCachedTerminal } from "./components/Terminal";
@@ -212,8 +212,8 @@ function AppContent() {
   const hasRestoredRef = useRef(false);
   const browserDockOpen = viewMode === "focus" && browserPanelOpen;
 
-  // Initialize PRBE IPC listeners
-  usePRBEIPC();
+  // Initialize coordinator agent IPC listeners
+  useCoordinatorAgentIPC();
 
   // Initialize keyboard shortcuts
   useKeyboardShortcuts();
@@ -805,7 +805,7 @@ function AppContent() {
           <DiffView />
 
           <Sidebar />
-          <PRBEPanel />
+          <CoordinatorPanel />
         </div>
 
         {/* Embedded browser dock, scoped to focus mode so the canvas never gets squeezed. */}
@@ -847,7 +847,7 @@ function AppContent() {
       <SettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} />
       <ApprovalSheet />
       <MoveSheet />
-      <PRBEInteractionDialog />
+      <CoordinatorInteractionDialog />
     </div>
   );
 }
