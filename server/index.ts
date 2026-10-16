@@ -9,6 +9,11 @@ import { apiRoutes } from "./routes/api";
 import { coordinatorAgentRoutes } from "./routes/coordinatorAgent";
 import { coordinatorRoutes } from "./routes/coordinator";
 import { devboxRoutes } from "./routes/devboxes";
+import { computeRoutes } from "./routes/compute";
+import { terminalRemoteManager } from "./services/terminalRemote";
+import { moveRoutes } from "./routes/move";
+import { resumeInFlightMoves } from "./services/sessionMove";
+import { reconcileNodes, startNodeTicker } from "./services/compute/nodes";
 import {
   sessions,
   restoreSessions,
@@ -42,6 +47,20 @@ function loopbackHost(value: string | undefined, port: number): boolean {
   return value === `localhost:${port}` || value === `127.0.0.1:${port}`;
 }
 
+/**
+ * Requests from a node arrive through the session's reverse tunnel with the
+ * node-side port in their Host header. Accept them only on a port the remote
+ * manager actually allocated, and only for what a node legitimately calls:
+ * status hooks, the compute API and session moves (the `naught` CLI).
+ */
+const NODE_TUNNEL_PATHS = [/^\/api\/status-update$/, /^\/api\/compute\//, /^\/api\/sessions\/[^/]+\/move(\/.*)?$/];
+
+export function nodeTunnelRequest(host: string | undefined, path: string, ports: Set<number> = terminalRemoteManager.hookPorts()): boolean {
+  const match = /^127\.0\.0\.1:(\d{1,5})$/.exec(host || "");
+  if (!match || !ports.has(Number(match[1]))) return false;
+  return NODE_TUNNEL_PATHS.some((pattern) => pattern.test(path));
+}
+
 function trustedBrowserOrigin(value: string | undefined, port: number): boolean {
   if (!value) return true;
   try {
@@ -59,7 +78,7 @@ function trustedBrowserOrigin(value: string | undefined, port: number): boolean 
 // Hono app for HTTP routes
 const app = new Hono();
 app.use("*", async (c, next) => {
-  if (!loopbackHost(c.req.header("host"), boundPort)) {
+  if (!loopbackHost(c.req.header("host"), boundPort) && !nodeTunnelRequest(c.req.header("host"), c.req.path)) {
     return c.json({ error: "Invalid local Host header" }, 403);
   }
   if (!trustedBrowserOrigin(c.req.header("origin"), boundPort)) {
@@ -71,6 +90,8 @@ app.route("/api", apiRoutes);
 app.route("/api/coordinator-agent", coordinatorAgentRoutes);
 app.route("/api/coordinator", coordinatorRoutes);
 app.route("/api/devboxes", devboxRoutes);
+app.route("/api/compute", computeRoutes);
+app.route("/api/sessions", moveRoutes);
 
 // Serve static files from client/dist in standalone (non-Electron) mode
 const CLIENT_DIST = join(__dirname, "..", "..", "..", "client", "dist");
@@ -132,6 +153,11 @@ function tryListen(app: Hono, port: number): Promise<{ server: any; port: number
 export async function startServer(): Promise<number> {
   await restoreSessions();
   startCoordinatorRuntime();
+  startNodeTicker();
+  resumeInFlightMoves();
+  reconcileNodes().catch((error) => {
+    if (!QUIET) console.warn("[compute] reconcile failed:", error?.message || error);
+  });
 
   const MAX_ATTEMPTS = 10;
   let server: any;

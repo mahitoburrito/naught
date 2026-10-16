@@ -34,6 +34,9 @@ import { UndoDeleteToast } from "./components/UndoDeleteToast";
 import { AgentActivityCenter } from "./components/AgentActivityCenter";
 import { CommandPalette } from "./components/CommandPalette";
 import { SettingsModal } from "./components/SettingsModal";
+import { ApprovalSheet } from "./components/compute/ApprovalSheet";
+import { MoveSheet } from "./components/move/MoveSheet";
+import type { MoveState } from "./types/compute";
 import { installRightDockExclusion } from "./stores/rightDock";
 import { getAgentAccentColor } from "./components/AgentIcon";
 import { CoordinatorPanel } from "./components/CoordinatorPanel";
@@ -52,6 +55,19 @@ const nodeTypes = {
 // Remember the last repo we auto-opened so a single finish event doesn't keep
 // re-triggering while the user is already looking at that repo's diff.
 let lastAutoOpenedRepo: string | null = null;
+
+// A move advances through several steps between polls; compare the fields a
+// card renders rather than the whole object so a quiet session never re-renders.
+function moveStateChanged(current: MoveState | undefined, next: MoveState | undefined): boolean {
+  if (!current || !next) return !!current !== !!next;
+  return (
+    current.state !== next.state ||
+    current.updatedAt !== next.updatedAt ||
+    current.error !== next.error ||
+    current.nodeId !== next.nodeId ||
+    current.direction !== next.direction
+  );
+}
 
 // When an agent finishes, surface the diff viewer if its repo has uncommitted
 // changes — but never yank the user out of a view they deliberately opened.
@@ -132,6 +148,10 @@ function restoreServerSessionToCanvas(sessionData: any) {
     agentModel: sessionData.agentModel,
     terminalCols: sessionData.terminalCols,
     terminalRows: sessionData.terminalRows,
+    devboxId: sessionData.devboxId || undefined,
+    devboxName: sessionData.devboxName || undefined,
+    remotePath: sessionData.remotePath || undefined,
+    move: sessionData.move || undefined,
   };
 
   addSession(sessionData.nodeId, restoredSession);
@@ -328,6 +348,21 @@ function AppContent() {
                 }
                 if (existing.terminalRows !== sessionData.terminalRows) {
                   sessionUpdates.terminalRows = sessionData.terminalRows;
+                }
+                // Remote placement changes during a move (devbox set on
+                // relaunch, cleared on bring-back) and the move itself steps
+                // forward between polls; keep the card current on every tick.
+                const nextDevboxId = sessionData.devboxId || undefined;
+                const nextDevboxName = sessionData.devboxName || undefined;
+                const nextRemotePath = sessionData.remotePath || undefined;
+                if (existing.devboxId !== nextDevboxId) sessionUpdates.devboxId = nextDevboxId;
+                if (existing.devboxName !== nextDevboxName) sessionUpdates.devboxName = nextDevboxName;
+                if (existing.remotePath !== nextRemotePath) sessionUpdates.remotePath = nextRemotePath;
+                const nextMove = (sessionData.move || undefined) as MoveState | undefined;
+                if (moveStateChanged(existing.move, nextMove)) sessionUpdates.move = nextMove;
+                // A bring-back into a fresh worktree gives the session a new cwd.
+                if (typeof sessionData.cwd === "string" && sessionData.cwd && existing.cwd !== sessionData.cwd) {
+                  sessionUpdates.cwd = sessionData.cwd;
                 }
                 if (existing.customName !== sessionData.customName) {
                   sessionUpdates.customName = sessionData.customName;
@@ -810,6 +845,8 @@ function AppContent() {
       <AgentActivityCenter />
       <CommandPalette />
       <SettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} />
+      <ApprovalSheet />
+      <MoveSheet />
       <CoordinatorInteractionDialog />
     </div>
   );

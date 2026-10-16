@@ -397,6 +397,12 @@ export interface Session {
   pluginReportedStatus?: boolean;
   lastPluginStatusTime?: number;
   claudeSessionId?: string;
+  /** Transcript path reported by the status hook, when the agent is Claude Code. */
+  transcriptPath?: string;
+  /** Codex rollout id, resolved on disk at move time. */
+  codexSessionId?: string;
+  /** An in-flight or last move to / from a node. */
+  move?: MoveState;
   currentTool?: string;
   lastHookEvent?: string;
   // Permission detection: when the current tool call started, used with
@@ -455,12 +461,14 @@ export interface LinearConfig {
   defaultAgentId?: string;
   /* Remote devboxes (Settings -> Devboxes) */
   devboxes?: DevboxConfig[];
+  /* Compute nodes (Settings -> Compute) */
+  compute?: ComputeConfig;
 }
 
 export interface DevboxConfig {
   id: string;
   name: string;
-  source: "manual" | "ssh-config";
+  source: "manual" | "ssh-config" | "provisioned";
   /** True when `ssh <name>` resolves through the user's own ssh config. */
   inSshConfig: boolean;
   host?: string;
@@ -469,6 +477,132 @@ export interface DevboxConfig {
   identityFile?: string;
   /** Remote working directory a session starts in. */
   defaultPath?: string;
+  /** Present when Naught provisioned this box through a compute provider. */
+  provision?: ProvisionRecord;
+}
+
+export type ProviderId = "modal" | "thunder";
+
+export type ProvisionStatus =
+  | "pending"
+  | "provisioning"
+  | "ready"
+  | "terminating"
+  | "terminated"
+  | "error";
+
+export type ProvisionRequester = { kind: "user" } | { kind: "session"; sessionId: string };
+
+export type TerminateReason = "user" | "agent" | "max-lifetime" | "provider" | "bring-back" | "failed";
+
+export interface ProvisionRecord {
+  provider: ProviderId;
+  /** Sandbox id (Modal) or instance uuid (Thunder). Empty until the provider answers. */
+  instanceId: string;
+  gpu?: string;
+  gpuCount: number;
+  cpu: number;
+  memoryGb: number;
+  diskGb?: number;
+  image?: string;
+  status: ProvisionStatus;
+  requestedBy: ProvisionRequester;
+  requestedAt: number;
+  /** Billing start: the provider reported the node ready. */
+  startedAt?: number;
+  /** Bootstrap finished; sessions may launch. */
+  readyAt?: number;
+  terminatedAt?: number;
+  terminateReason?: TerminateReason;
+  /** Estimate; the UI always labels it "est.". */
+  hourlyUsd: number;
+  maxLifetimeHours: number;
+  lastActivityAt: number;
+  emails: {
+    started?: number;
+    reminderCount: number;
+    lastReminderAt?: number;
+    idleAlertAt?: number;
+    idleAlertCount: number;
+    terminated?: number;
+  };
+  /** Policy reasons while `status` is `pending`. */
+  reasons?: string[];
+  error?: string;
+  /** Versions reported by bootstrap. */
+  versions?: Record<string, string>;
+}
+
+export interface ComputePolicy {
+  maxConcurrentNodes: number;
+  allowedGpus: string[] | "any";
+  maxLifetimeHours: number;
+  maxHourlyUsd: number;
+}
+
+export interface ComputeNotifications {
+  to?: string;
+  from: string;
+  reminderHours: number;
+  idleAlertMinutes: number;
+}
+
+export interface ComputeConfig {
+  policy: ComputePolicy;
+  notifications: ComputeNotifications;
+  nodeCredentials: { syncCodexAuth: boolean };
+}
+
+export type MoveDirection = "out" | "home";
+
+export type MoveStep =
+  | "waiting-idle"
+  | "prepare"
+  | "quiesce"
+  | "sync-files"
+  | "sync-agent"
+  | "relaunch"
+  | "verify"
+  | "done"
+  | "error";
+
+export type MoveHarness =
+  | { kind: "claude"; sessionId: string; transcriptPath?: string }
+  | { kind: "codex"; sessionId: string; rolloutPath: string }
+  | { kind: "shell" };
+
+export interface ManifestSummary {
+  hash: string;
+  files: number;
+  bytes: number;
+  roots: string[];
+}
+
+export interface MoveHistoryEntry {
+  direction: MoveDirection;
+  nodeId: string;
+  at: number;
+  manifestHash: string;
+}
+
+export interface MoveState {
+  direction: MoveDirection;
+  state: MoveStep;
+  nodeId: string;
+  startedAt: number;
+  updatedAt: number;
+  harness: MoveHarness;
+  /** Local absolute paths copied: the session cwd, plus a linked worktree's mother `.git`. */
+  roots: string[];
+  manifest?: ManifestSummary;
+  includeIgnored: boolean;
+  /** The step that failed, for retry. */
+  failedStep?: MoveStep;
+  error?: string;
+  /** Bring-back options chosen in the sheet. */
+  conflict?: "overwrite" | "worktree";
+  terminateNode?: boolean;
+  history: MoveHistoryEntry[];
 }
 
 export interface PersistedNode {
@@ -485,6 +619,7 @@ export interface PersistedNode {
   originalCwd?: string;
   devboxId?: string;
   remotePath?: string;
+  move?: MoveState;
   createdAt: string;
   customName?: string;
   generatedTitle?: string;

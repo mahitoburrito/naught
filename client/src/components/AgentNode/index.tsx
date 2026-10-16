@@ -7,6 +7,7 @@ import { AgentNodeCard } from "./AgentNodeCard";
 import { AgentNodeContextMenu } from "./AgentNodeContextMenu";
 import { useAgentNodeState } from "./useAgentNodeState";
 import { getAgentAccentColor } from "../AgentIcon";
+import { useComputeNodeName } from "../../hooks/useComputeNodes";
 
 interface AgentNodeData {
   label: string;
@@ -31,7 +32,16 @@ export const AgentNode = ({ id, data, selected }: NodeProps) => {
     handleContextMenu,
     handleDelete,
     closeContextMenu,
+    handleMove,
+    handleRetryMove,
+    handleCancelMove,
+    moveActionBusy,
   } = useAgentNodeState(id, nodeData, session);
+
+  // While moving out the session does not carry devboxName yet; the shared
+  // nodes poller knows the destination's name from its id.
+  const moveActive = !!session?.move && session.move.state !== "done" && session.move.state !== "error";
+  const moveNodeName = useComputeNodeName(moveActive ? session?.move?.nodeId : undefined);
 
   const addFocusedSession = useStore((state) => state.addFocusedSession);
   const setViewMode = useStore((state) => state.setViewMode);
@@ -195,6 +205,14 @@ export const AgentNode = ({ id, data, selected }: NodeProps) => {
           isRestoringCheckpoint={isRestoringCheckpoint}
           onRestoreLaunchCheckpoint={handleRestoreLaunchCheckpoint}
           onReviewChanges={handleReviewChanges}
+          devboxId={session?.devboxId}
+          devboxName={session?.devboxName}
+          remotePath={session?.remotePath}
+          move={session?.move}
+          moveNodeName={moveNodeName}
+          moveActionBusy={moveActionBusy}
+          onRetryMove={handleRetryMove}
+          onCancelMove={handleCancelMove}
         />
 
         {isDraggingFile && (
@@ -231,6 +249,9 @@ export const AgentNode = ({ id, data, selected }: NodeProps) => {
           position={contextMenu}
           onClose={closeContextMenu}
           onDelete={handleDelete}
+          onMove={session ? handleMove : undefined}
+          isRemote={!!session?.devboxId}
+          moveDisabled={moveActive}
         />
       )}
     </>

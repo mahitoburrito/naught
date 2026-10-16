@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
-import { GitBranch, Folder, Wrench, Layers, Loader2, RotateCcw, FileDiff } from "lucide-react";
+import { GitBranch, Folder, Wrench, Layers, Loader2, RotateCcw, FileDiff, Server, AlertTriangle } from "lucide-react";
 import { AgentStatus, type AgentChangeSummary, type CheckpointSummary } from "../../stores/useStore";
 import { agentStatusStyle } from "../../theme/agentStatus";
+import { MOVE_STEP_LABELS, type MoveState } from "../../types/compute";
 import { AgentIcon } from "../AgentIcon";
 
 // How long a card has to sit waiting before it starts pulsing. Short enough
@@ -70,6 +71,16 @@ interface AgentNodeCardProps {
   isRestoringCheckpoint?: boolean;
   onRestoreLaunchCheckpoint?: () => void;
   onReviewChanges?: () => void;
+  // Remote placement and in-flight move (one extra row at most)
+  devboxId?: string;
+  devboxName?: string;
+  remotePath?: string;
+  move?: MoveState;
+  /** Destination name while moving out, before the session carries devboxName. */
+  moveNodeName?: string;
+  moveActionBusy?: boolean;
+  onRetryMove?: () => void;
+  onCancelMove?: () => void;
 }
 
 export function AgentNodeCard({
@@ -92,8 +103,24 @@ export function AgentNodeCard({
   isRestoringCheckpoint = false,
   onRestoreLaunchCheckpoint,
   onReviewChanges,
+  devboxId,
+  devboxName,
+  remotePath,
+  move,
+  moveNodeName,
+  moveActionBusy = false,
+  onRetryMove,
+  onCancelMove,
 }: AgentNodeCardProps) {
   const statusInfo = agentStatusStyle(status);
+  const errorStyle = agentStatusStyle("error");
+  const moveFailed = move?.state === "error";
+  const moveActive = !!move && !moveFailed && move.state !== "done";
+  const moveLabel = move
+    ? move.direction === "home"
+      ? `Bringing back · ${MOVE_STEP_LABELS[move.state]}`
+      : `Moving to ${moveNodeName || devboxName || "node"} · ${MOVE_STEP_LABELS[move.state]}`
+    : null;
   const isActive = statusInfo.isActive;
   const isToolCalling = status === "tool_calling";
   const needsAttention = statusInfo.needsAttention;
@@ -210,6 +237,58 @@ export function AgentNodeCard({
             )}
           </div>
         )}
+
+        {/* Remote placement / move progress: one row, most urgent state wins */}
+        {moveFailed && move ? (
+          <div className="mt-2 flex min-w-0 items-center gap-1.5 text-[10px]" style={{ color: errorStyle.color }}>
+            <AlertTriangle className="w-3 h-3 flex-shrink-0" />
+            <span className="min-w-0 flex-1 truncate" title={move.error || "Move failed"}>
+              {move.error || "Move failed"}
+            </span>
+            {onRetryMove && (
+              <button
+                type="button"
+                disabled={moveActionBusy}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onRetryMove();
+                }}
+                className="flex-shrink-0 rounded border border-zinc-700/80 bg-zinc-900/45 px-1.5 py-0.5 text-[10px] text-zinc-300 transition-colors hover:border-zinc-500 hover:text-zinc-100 disabled:opacity-50"
+                title="Retry the move from the failed step"
+              >
+                Retry
+              </button>
+            )}
+            {onCancelMove && (
+              <button
+                type="button"
+                disabled={moveActionBusy}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onCancelMove();
+                }}
+                className="flex-shrink-0 rounded border border-zinc-700/80 bg-zinc-900/45 px-1.5 py-0.5 text-[10px] text-zinc-400 transition-colors hover:border-zinc-500 hover:text-zinc-100 disabled:opacity-50"
+                title="Cancel the failed move; local files are untouched"
+              >
+                Cancel
+              </button>
+            )}
+          </div>
+        ) : moveActive && moveLabel ? (
+          <div className="mt-2 flex min-w-0 items-center gap-1.5 text-[10px] text-zinc-400" aria-live="polite">
+            <Loader2 className="w-3 h-3 flex-shrink-0 animate-spin text-zinc-500" />
+            <span className="truncate" title={moveLabel}>{moveLabel}</span>
+          </div>
+        ) : devboxId ? (
+          <div
+            className="mt-2 flex min-w-0 items-center gap-1.5 text-[10px] text-zinc-400"
+            title={remotePath ? `${devboxName || "node"}:${remotePath}` : devboxName || "node"}
+          >
+            <Server className="w-3 h-3 flex-shrink-0 text-zinc-500" />
+            <span className="flex-shrink-0 truncate">{devboxName || "node"}</span>
+            {remotePath && <span className="min-w-0 truncate font-mono text-zinc-500">{remotePath}</span>}
+          </div>
+        ) : null}
 
         {(changedFileCount > 0 || launchCheckpoint) && (
           <div className="mt-2 flex items-center gap-1.5">

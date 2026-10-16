@@ -14,6 +14,7 @@ import {
   deletePersistedCategories,
   pruneEmptyTitleClusters,
 } from "../utils/canvasLayout";
+import type { MoveState } from "../types/compute";
 
 // localStorage keys for crash-resilient UI state
 const STORAGE_KEY = "openui-desktop-ui-state";
@@ -111,6 +112,25 @@ export interface AgentSession {
   agentModel?: string;
   terminalCols?: number;
   terminalRows?: number;
+  // Remote placement: set when the session runs on a devbox or provisioned node
+  devboxId?: string;
+  devboxName?: string;
+  remotePath?: string;
+  // In-flight or failed move to / from a node (see types/compute.ts)
+  move?: MoveState;
+}
+
+export type SettingsTabId =
+  | "general"
+  | "sessions"
+  | "devboxes"
+  | "compute"
+  | "appearance"
+  | "integrations";
+
+export interface MoveSheetRequest {
+  nodeId: string;
+  direction: "out" | "home";
 }
 
 export interface DeleteToast {
@@ -221,6 +241,13 @@ interface AppState {
   setCommandPaletteOpen: (open: boolean) => void;
   settingsOpen: boolean;
   setSettingsOpen: (open: boolean) => void;
+  // Tab the settings modal should land on when it next opens (consumed by SettingsModal).
+  settingsTab?: SettingsTabId;
+  setSettingsTab: (tab?: SettingsTabId) => void;
+  // Move-to-node / bring-back sheet for one session card
+  moveSheet: MoveSheetRequest | null;
+  openMoveSheet: (nodeId: string, direction: MoveSheetRequest["direction"]) => void;
+  closeMoveSheet: () => void;
   activityCenterOpen: boolean;
   setActivityCenterOpen: (open: boolean) => void;
   agentProfilesOpen: boolean;
@@ -502,6 +529,11 @@ export const useStore = create<AppState>((set) => ({
   setCommandPaletteOpen: (open) => set({ commandPaletteOpen: open }),
   settingsOpen: false,
   setSettingsOpen: (open) => set({ settingsOpen: open }),
+  settingsTab: undefined,
+  setSettingsTab: (tab) => set({ settingsTab: tab }),
+  moveSheet: null,
+  openMoveSheet: (nodeId, direction) => set({ moveSheet: { nodeId, direction } }),
+  closeMoveSheet: () => set({ moveSheet: null }),
   activityCenterOpen: false,
   setActivityCenterOpen: (open) =>
     set(
