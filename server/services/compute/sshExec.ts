@@ -25,6 +25,9 @@ export interface SshRunOptions {
   spawn?: typeof nodeSpawn;
   /** Extra ssh options before the target (e.g. a `-R` forward). */
   extraArgs?: string[];
+  /** bootstrapNode: attempts on ssh transport failure, and the base delay between them. */
+  retries?: number;
+  retryDelayMs?: number;
 }
 
 export function sshArgsFor(

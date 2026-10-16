@@ -29,6 +29,8 @@ import {
   relativeToHome,
   resumeCommand,
   type HarnessKind,
+  NODE_FIRST_RUN_SCRIPT,
+  firstRunPatchFor,
 } from "./move/harness";
 import { deleteLocal, deleteRemote, ensureRemoteDirectory, pullFiles, pushFiles, type TransferDeps } from "./move/transfer";
 import { saveState } from "./persistence";
@@ -117,9 +119,25 @@ function sleep(ms: number): Promise<void> {
 
 const IDLE_STATUSES = new Set(["idle", "waiting_input", "disconnected", "error"]);
 
+/**
+ * Idle for the purpose of a move. The status engine is authoritative only
+ * where hooks report (Claude Code); Codex and plain shells have none, and
+ * their inferred status can stay "running" indefinitely at an idle prompt.
+ * An idle TUI prints nothing, so terminal silence is the fallback signal:
+ * 8 s for agents without hooks, 30 s for Claude in case its hooks are not
+ * reaching Naught.
+ */
+export function isIdleForMove(session: Session, now: number): boolean {
+  if (!session.pty || IDLE_STATUSES.has(session.status)) return true;
+  const kind = harnessKindFor(session.agentId, session.command);
+  const quietMs = kind === "claude" && session.pluginReportedStatus ? 30_000 : 8_000;
+  const lastActivity = Math.max(session.lastOutputTime || 0, session.lastInputTime || 0);
+  return lastActivity > 0 && now - lastActivity >= quietMs;
+}
+
 async function waitForIdle(session: Session): Promise<void> {
   const started = deps.now();
-  while (session.pty && !IDLE_STATUSES.has(session.status)) {
+  while (!isIdleForMove(session, Date.now())) {
     if (deps.now() - started > deps.timing.idleTimeoutMs) throw new Error("the agent never went idle");
     await sleep(deps.timing.pollMs);
   }
@@ -222,7 +240,7 @@ function credentialFor(harness: MoveHarness): { key?: string; missing?: string }
 
 function agentStateOf(session: Session): MovePlan["agentState"] {
   if (!session.pty) return "stopped";
-  return IDLE_STATUSES.has(session.status) ? "idle" : "working";
+  return isIdleForMove(session, Date.now()) ? "idle" : "working";
 }
 
 export async function planMoveOut(sessionId: string, options: { nodeId?: string; includeIgnored?: boolean; manifest?: boolean } = {}): Promise<MovePlan> {
@@ -483,17 +501,34 @@ async function syncAgentOut(ctx: MoveContext): Promise<void> {
     await deps.runRemote(devbox, `mkdir -p ${shellQuote(expectedDir)} ${shellQuote(join(remoteHomeDir, ".claude", "todos"))}`, { timeoutMs: 30_000 });
   } else if (move.harness.kind === "codex") {
     files.push(move.harness.rolloutPath);
-    if (getComputeConfig().nodeCredentials.syncCodexAuth && existsSync(codexAuthPath(localHome)) && !nodeCredentials().OPENAI_API_KEY) {
-      files.push(codexAuthPath(localHome));
-    }
-  } else {
-    return;
   }
+  // Codex's login travels with any Codex session, conversation found or not:
+  // a fresh Codex on the node is just as stuck at the sign-in screen.
+  if (
+    harnessKindFor(session.agentId, session.command) === "codex" &&
+    getComputeConfig().nodeCredentials.syncCodexAuth &&
+    existsSync(codexAuthPath(localHome)) &&
+    !nodeCredentials().OPENAI_API_KEY
+  ) {
+    files.push(codexAuthPath(localHome));
+  }
+  if (files.length) {
   const outside = files.filter((file) => relativeToHome(file, localHome) === null);
   if (outside.length) throw new Error(`agent state outside the home directory cannot be re-rooted: ${outside[0]}`);
   await deps.transfer.push(devbox, files, { memberBase: localHome, localRoot: localHome, remoteRoot: remoteHomeDir });
-  if (move.harness.kind === "codex" && files.some((f) => f.endsWith("auth.json"))) {
+  if (files.some((f) => f.endsWith("/.codex/auth.json"))) {
     await deps.runRemote(devbox, `chmod 600 ${shellQuote(join(remoteHomeDir, ".codex", "auth.json"))}`, { timeoutMs: 30_000 });
+  }
+  }
+  // Carry first-run decisions so the agent does not stop on the onboarding or
+  // folder-trust screen on a machine it has never run on. Keyed on the agent
+  // itself, not on whether a conversation was found: a fresh start needs it too.
+  const patch = firstRunPatchFor(harnessKindFor(session.agentId, session.command), localHome, session.cwd);
+  if (patch) {
+    const result = await deps.runRemote(devbox, `python3 -c ${shellQuote(NODE_FIRST_RUN_SCRIPT)}`, { input: JSON.stringify(patch), timeoutMs: 30_000 });
+    if (result.code !== 0 || !result.stdout.includes("NAUGHT_FIRST_RUN_OK")) {
+      log(`[move] ${ctx.sessionId}: first-run state not written on the node: ${result.stderr.trim().split("\n")[0] || `exit ${result.code}`}`);
+    }
   }
 }
 

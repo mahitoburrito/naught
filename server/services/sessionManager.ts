@@ -159,6 +159,29 @@ export function getDefaultShellLaunch(): { shell: string; args: string[] } {
   return launch;
 }
 
+/** Session markers set by a running Claude Code for its own children. Config such as CLAUDE_CODE_OAUTH_TOKEN is kept. */
+const INHERITED_AGENT_SESSION_KEYS = new Set([
+  "CLAUDECODE",
+  "CLAUDE_PID",
+  "CLAUDE_EFFORT",
+  "CLAUDE_CODE_ENTRYPOINT",
+  "CLAUDE_CODE_SESSION_ID",
+  "CLAUDE_CODE_CHILD_SESSION",
+  "CLAUDE_CODE_SESSION_ATTENDED",
+  "CLAUDE_CODE_SSE_PORT",
+  "CLAUDE_CODE_EXECPATH",
+  "CLAUDE_CODE_MESSAGING_SOCKET",
+  "CLAUDE_CODE_MESSAGING_TOKEN",
+]);
+
+export function stripInheritedAgentSession(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const out: NodeJS.ProcessEnv = {};
+  for (const [key, value] of Object.entries(env)) {
+    if (!INHERITED_AGENT_SESSION_KEYS.has(key)) out[key] = value;
+  }
+  return out;
+}
+
 export function getPtyEnvironment(
   sessionId: string,
   profile?: {
@@ -173,7 +196,12 @@ export function getPtyEnvironment(
   },
 ): Record<string, string> {
   // NO_COLOR makes agent CLIs monochrome even though xterm supports full ANSI.
-  const { NO_COLOR: _noColor, ...rest } = process.env;
+  const { NO_COLOR: _noColor, ...inherited } = process.env;
+  // When Naught itself was started from inside a Claude Code session, that
+  // session's markers ride along in process.env. A Claude launched in a Naught
+  // session would then think it is a child of the outer one and, among other
+  // things, turn transcript saving off, which leaves nothing to resume or move.
+  const rest = stripInheritedAgentSession(inherited);
   const shimEnvironment = prepareShellShimEnvironment(sessionId, rest as Record<string, string | undefined>);
   return {
     ...rest,

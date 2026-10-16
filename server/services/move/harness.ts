@@ -138,10 +138,26 @@ export function codexAuthPath(home: string = homedir()): string {
   return join(home, ".codex", "auth.json");
 }
 
+/** The command without any resume a previous move added, so flags survive repeated moves. */
+export function baseAgentCommand(kind: HarnessKind, command: string): string {
+  let base = command.trim();
+  if (kind === "claude") {
+    base = base.replace(/\s+(?:--resume|-r)(?:=|\s+)\S+/g, "").replace(/\s+(?:--continue|-c)(?=\s|$)/g, "");
+  } else if (kind === "codex") {
+    base = base.replace(/\s+resume(?:\s+--last)?(?:\s+[0-9a-f-]{8,})?\s*$/i, "");
+  }
+  return base.trim();
+}
+
+/**
+ * Resume the same conversation with the flags the user launched with
+ * (`--model`, `--no-daemon`, permission modes) intact.
+ */
 export function resumeCommand(kind: HarnessKind, originalCommand: string, sessionId?: string): string {
-  if (kind === "claude" && sessionId) return `claude --resume ${sessionId}`;
-  if (kind === "codex" && sessionId) return `codex resume ${sessionId}`;
-  return originalCommand;
+  const base = baseAgentCommand(kind, originalCommand);
+  if (kind === "claude" && sessionId) return `${base || "claude"} --resume ${sessionId}`;
+  if (kind === "codex" && sessionId) return `${base || "codex"} resume ${sessionId}`;
+  return base || originalCommand;
 }
 
 export function exitCommand(kind: HarnessKind): string {
@@ -159,4 +175,104 @@ export function relativeToHome(path: string, home: string = homedir()): string |
 
 export function remoteHomePath(remoteHome: string, relFromHome: string): string {
   return `${remoteHome.replace(/\/$/, "")}/${relFromHome}`;
+}
+
+// ─── first-run state on the node ────────────────────────────────────────────
+//
+// A fresh node has never run Claude Code or Codex, so a resumed session would
+// stop on the onboarding (theme) screen and the folder-trust screen, inside a
+// card the user did not expect to babysit. The move carries the user's own
+// local decisions across: onboarding is marked done, and the moved folder is
+// trusted on the node only when it (or an ancestor) is trusted here.
+
+function isSameOrAncestor(ancestor: string, path: string): boolean {
+  const a = ancestor.replace(/\/+$/, "");
+  return path === a || path.startsWith(`${a}/`);
+}
+
+export function localClaudeTrust(home: string, cwd: string): { trusted: boolean; onboardingVersion?: string } {
+  try {
+    const config = JSON.parse(readFileSync(join(home, ".claude.json"), "utf-8"));
+    const projects = config && typeof config.projects === "object" ? config.projects : {};
+    const trusted = Object.entries(projects).some(
+      ([path, entry]: [string, any]) => entry?.hasTrustDialogAccepted === true && isSameOrAncestor(path, cwd),
+    );
+    return {
+      trusted,
+      onboardingVersion: typeof config.lastOnboardingVersion === "string" ? config.lastOnboardingVersion : undefined,
+    };
+  } catch {
+    return { trusted: false };
+  }
+}
+
+export function localCodexTrusted(home: string, cwd: string): boolean {
+  try {
+    const text = readFileSync(join(home, ".codex", "config.toml"), "utf-8");
+    const re = /^\[projects\.("(?:[^"\\]|\\.)*"|'[^']*')\]\s*\n(?:[^\[]*?\n)?\s*trust_level\s*=\s*"trusted"/gm;
+    for (const match of text.matchAll(re)) {
+      const raw = match[1];
+      const path = raw.startsWith('"') ? JSON.parse(raw) : raw.slice(1, -1);
+      if (isSameOrAncestor(path, cwd)) return true;
+    }
+  } catch {
+    // No config, nothing trusted.
+  }
+  return false;
+}
+
+export interface NodeFirstRunPatch {
+  claude?: { trustPath?: string; onboardingVersion?: string };
+  codex?: { trustPath?: string };
+}
+
+/** Python, run on the node with the patch as JSON on stdin. Idempotent. */
+export const NODE_FIRST_RUN_SCRIPT = String.raw`
+import json, os, sys
+patch = json.load(sys.stdin)
+home = os.path.expanduser("~")
+claude = patch.get("claude")
+if claude is not None:
+    path = os.path.join(home, ".claude.json")
+    try:
+        with open(path) as handle:
+            data = json.load(handle)
+    except Exception:
+        data = {}
+    data["hasCompletedOnboarding"] = True
+    if claude.get("onboardingVersion") and not data.get("lastOnboardingVersion"):
+        data["lastOnboardingVersion"] = claude["onboardingVersion"]
+    if claude.get("trustPath"):
+        data.setdefault("projects", {}).setdefault(claude["trustPath"], {})["hasTrustDialogAccepted"] = True
+    tmp = path + ".naught-tmp"
+    with open(tmp, "w") as handle:
+        json.dump(data, handle)
+    os.replace(tmp, path)
+codex = patch.get("codex")
+if codex is not None:
+    path = os.path.join(home, ".codex", "config.toml")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    text = open(path).read() if os.path.exists(path) else ""
+    # The startup update notice is a blocking screen; on a node nobody is
+    # there to dismiss it. Top-level keys must precede every table.
+    if "check_for_update_on_startup" not in text:
+        text = "check_for_update_on_startup = false\n" + text
+    if codex.get("trustPath"):
+        header = "[projects.%s]" % json.dumps(codex["trustPath"])
+        if header not in text:
+            text += ("\n" if text and not text.endswith("\n") else "") + header + '\ntrust_level = "trusted"\n'
+    with open(path, "w") as handle:
+        handle.write(text)
+print("NAUGHT_FIRST_RUN_OK")
+`;
+
+export function firstRunPatchFor(kind: HarnessKind, home: string, cwd: string): NodeFirstRunPatch | null {
+  if (kind === "claude") {
+    const local = localClaudeTrust(home, cwd);
+    return { claude: { trustPath: local.trusted ? cwd : undefined, onboardingVersion: local.onboardingVersion } };
+  }
+  if (kind === "codex") {
+    return { codex: { trustPath: localCodexTrusted(home, cwd) ? cwd : undefined } };
+  }
+  return null;
 }

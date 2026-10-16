@@ -138,6 +138,9 @@ export function buildBootstrapScript(input: { version: string; installAgents: bo
           "fi",
         ]
       : []),
+    // A node has never run Claude Code: mark onboarding done so a session
+    // started here does not stop on the theme picker.
+    `python3 -c ${shellQuote('import json,os\np=os.path.expanduser("~/.claude.json")\ntry:\n d=json.load(open(p))\nexcept Exception:\n d={}\nif not d.get("hasCompletedOnboarding"):\n d["hasCompletedOnboarding"]=True\n json.dump(d,open(p+".t","w"));os.replace(p+".t",p)')} || warn 'could not mark Claude onboarding done'`,
     `printf '%s\\n' ${shellQuote(input.version)} > "$N/${NODE_ASSET_VERSION_FILE}"`,
     "v() { if command -v \"$1\" >/dev/null 2>&1; then \"$1\" --version 2>/dev/null | head -n 1; else echo missing; fi; }",
     "python3 - \"$(v claude)\" \"$(v codex)\" \"$(v python3)\" \"$(v node)\" \"$(v tar)\" \"$(v rsync)\" <<'PY'",
@@ -231,8 +234,24 @@ export async function bootstrapNode(
   options: SshRunOptions = {},
 ): Promise<BootstrapResult> {
   const { tar, version } = await buildNodeTar(payload);
-  const result = await runOverSsh(devbox, REMOTE_UNPACK_COMMAND, { timeoutMs: 10 * 60_000, ...options, input: tar });
-  return parseBootstrapOutput(result, version);
+  // A provider's tunnel can accept TCP a few seconds before sshd is ready to
+  // finish a handshake ("Connection closed by …", ssh exit 255). The unpack is
+  // idempotent, so ssh-level failures are retried; a failure of the script
+  // itself is not.
+  const attempts = options.retries ?? 5;
+  let result: SshRunResult | undefined;
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    result = await runOverSsh(devbox, REMOTE_UNPACK_COMMAND, { timeoutMs: 10 * 60_000, ...options, input: tar });
+    if (!isSshTransportFailure(result) || attempt === attempts) break;
+    await new Promise((resolve) => setTimeout(resolve, (options.retryDelayMs ?? 3_000) * attempt));
+  }
+  return parseBootstrapOutput(result!, version);
+}
+
+/** ssh itself failed (no remote command ran): exit 255 with a connection-level message. */
+export function isSshTransportFailure(result: SshRunResult): boolean {
+  return result.code === 255 &&
+    /Connection (closed|refused|reset|timed out)|kex_exchange_identification|Connection to .* closed by remote host|banner exchange/i.test(result.stderr);
 }
 
 /**

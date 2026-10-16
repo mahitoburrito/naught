@@ -1,7 +1,7 @@
 {
   "name": "@mahitoburrito/openui-desktop",
   "version": "1.0.9",
-  "description": "AI Agent Command Center — Desktop App",
+  "description": "AI Agent Command Center \u2014 Desktop App",
   "main": "dist/electron/electron/main.js",
   "author": "mahitoburrito <mahitraj@gmail.com>",
   "license": "MIT",
@@ -59,7 +59,8 @@
     "test:move:docker": "npm run build:electron && node scripts/test-move-docker.mjs",
     "smoke:compute-live": "npm run build:electron && node scripts/smoke-compute-live.mjs",
     "smoke:move-live": "npm run build:electron && node scripts/smoke-move-live.mjs",
-    "test:coordinator-agent": "npm run build:electron && node scripts/test-coordinator-agent.mjs"
+    "test:coordinator-agent": "npm run build:electron && node scripts/test-coordinator-agent.mjs",
+    "smoke:agent-move-live": "npm run build:electron && node scripts/smoke-agent-move-live.mjs"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.133.0",

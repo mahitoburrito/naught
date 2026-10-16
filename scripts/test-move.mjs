@@ -141,6 +141,8 @@ section("harness");
   check("codex state honours since", harness.findCodexState({ home, cwd, since: Date.parse("2026-10-12T02:30:00.000Z") }), null);
   check("codex state by id", harness.findCodexState({ home, cwd, since, sessionId: "old" }).rolloutPath.endsWith("old.jsonl"), true);
   check("resume commands", [harness.resumeCommand("claude", "claude", "abc"), harness.resumeCommand("codex", "codex", "u1"), harness.resumeCommand("shell", "bash")], ["claude --resume abc", "codex resume u1", "bash"]);
+  check("resume keeps the launch flags", [harness.resumeCommand("claude", "claude --model opus", "abc"), harness.resumeCommand("codex", "codex --no-daemon -m o3", "u1")], ["claude --model opus --resume abc", "codex --no-daemon -m o3 resume u1"]);
+  check("a second move replaces the earlier resume instead of stacking", [harness.resumeCommand("claude", "claude --model opus --resume abc", "def"), harness.resumeCommand("codex", "codex --no-daemon resume 019eb78e-607f-7b31", "u2")], ["claude --model opus --resume def", "codex --no-daemon resume u2"]);
   check("exit commands", [harness.exitCommand("claude"), harness.exitCommand("codex"), harness.exitCommand("shell")], ["/exit", "/quit", "exit"]);
   check("relative to home", [harness.relativeToHome(join(home, ".claude", "x.jsonl"), home), harness.relativeToHome("/etc/passwd", home)], [".claude/x.jsonl", null]);
   check("remote home path", harness.remoteHomePath("/root/", ".codex/auth.json"), "/root/.codex/auth.json");
@@ -384,6 +386,26 @@ section("move state machine");
   check("unknown session is 404", (await call("GET", "/api/sessions/nope/move")).status, 404);
 
   if (previousLaunch === undefined) delete process.env.LAUNCH_CWD; else process.env.LAUNCH_CWD = previousLaunch;
+}
+
+
+section("idle detection for moves");
+{
+  const mv = await import(join(dist, "services", "sessionMove.js"));
+  const now = 1_000_000;
+  const base = { pty: {}, agentId: "codex", command: "codex", status: "running", lastOutputTime: now - 9_000, lastInputTime: 0 };
+  check("codex silent for 9 s counts as idle despite a stale running status", mv.isIdleForMove(base, now), true);
+  check("codex printing 2 s ago is working", mv.isIdleForMove({ ...base, lastOutputTime: now - 2_000 }, now), false);
+  check("claude with live hooks needs 30 s of silence", [mv.isIdleForMove({ ...base, agentId: "claude", command: "claude", pluginReportedStatus: true }, now), mv.isIdleForMove({ ...base, agentId: "claude", command: "claude", pluginReportedStatus: true, lastOutputTime: now - 31_000 }, now)], [false, true]);
+  check("an idle status is idle at once", mv.isIdleForMove({ ...base, status: "idle", lastOutputTime: now }, now), true);
+  check("a stopped process is idle", mv.isIdleForMove({ ...base, pty: null, lastOutputTime: now }, now), true);
+}
+
+section("inherited agent session env");
+{
+  const sm = await import(join(dist, "services", "sessionManager.js"));
+  const env = sm.stripInheritedAgentSession({ PATH: "/bin", CLAUDECODE: "1", CLAUDE_CODE_CHILD_SESSION: "1", CLAUDE_CODE_SESSION_ID: "x", CLAUDE_CODE_OAUTH_TOKEN: "keep", CLAUDE_CONFIG_DIR: "/c" });
+  check("outer Claude session markers are dropped, config is kept", Object.keys(env).sort(), ["CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CONFIG_DIR", "PATH"]);
 }
 
 console.log(`\n${passed} passed, ${failed} failed`);

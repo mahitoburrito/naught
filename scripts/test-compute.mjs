@@ -442,6 +442,19 @@ section("bootstrap");
   const matching = await bootstrap.ensureNodeAssets(box, { spawn: (c, a, o) => nodeSpawn("sh", ["-c", `printf '%s\\n' '${bootstrap.assetsVersion()}'`], o) });
   check("ensureNodeAssets skips shipping when the version matches", matching, { ok: true, shipped: false });
   check("nodeHomeOf", [bootstrap.nodeHomeOf(box), bootstrap.nodeHomeOf({ ...box, user: "root" })], ["/home/ubuntu", "/root"]);
+  check("transport failures are recognised", [
+    bootstrap.isSshTransportFailure({ code: 255, stderr: "Connection closed by 3.237.255.73 port 42951\n" }),
+    bootstrap.isSshTransportFailure({ code: 255, stderr: "kex_exchange_identification: read: Connection reset by peer" }),
+    bootstrap.isSshTransportFailure({ code: 1, stderr: "Connection closed" }),
+    bootstrap.isSshTransportFailure({ code: 255, stderr: "Permission denied (publickey)." }),
+  ], [true, true, false, false]);
+  let tries = 0;
+  const flaky = (c, a, o) => { tries++; return nodeSpawn("sh", ["-c", tries < 3 ? "cat >/dev/null; echo 'Connection closed by 1.2.3.4 port 22' >&2; exit 255" : "cat >/dev/null; echo 'NAUGHT_BOOTSTRAP_OK {}'"], o); };
+  const retried = await bootstrap.bootstrapNode(box, { installAgents: false, assets: [] }, { spawn: flaky, retryDelayMs: 1 });
+  check("bootstrap retries ssh transport failures until sshd answers", [retried.ok, tries], [true, 3]);
+  tries = 0;
+  const broken = await bootstrap.bootstrapNode(box, { installAgents: false, assets: [] }, { spawn: (c, a, o) => { tries++; return nodeSpawn("sh", ["-c", "cat >/dev/null; echo 'tar: broken' >&2; exit 2"], o); }, retryDelayMs: 1 });
+  check("a script failure is not retried", [broken.ok, tries], [false, 1]);
 }
 
 
