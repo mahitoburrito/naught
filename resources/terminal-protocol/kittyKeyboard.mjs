@@ -95,6 +95,10 @@ export function encodeKittyKeyboardEvent(
   const flags = rawFlags & KITTY_KEYBOARD_SUPPORTED_FLAGS;
   if (!flags || event.isComposing || event.key === "Dead" || event.key === "Process" ||
     event.key === "Unidentified") return null;
+  // On macOS, Cmd shortcuts (paste, copy, app shortcuts) belong to the app, as
+  // in Terminal and iTerm. Encoding them as Super sent "super+v" alongside the
+  // real paste, and Kitty-aware programs typed it as a literal "v".
+  if (isMac && event.metaKey) return null;
 
   const reportEvents = (flags & 2) !== 0;
   const modifierCode = MODIFIER_KEY_CODES.get(event.code);
