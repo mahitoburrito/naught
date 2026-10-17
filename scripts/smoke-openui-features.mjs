@@ -932,6 +932,18 @@ async function runKittyKeyboardUnitTests() {
       encodeKittyKeyboardEvent(key({ altKey: true }), 1, false) === "\x1b[97;3u",
     "Kitty Option/Alt disambiguation did not preserve macOS composed input",
   );
+  // On macOS, Cmd shortcuts belong to the app. Encoding Cmd+V as super+v made
+  // Kitty-aware programs (Claude Code) type a literal "v" next to every paste.
+  const cmd = (overrides = {}) => key({ metaKey: true, ...overrides });
+  await assert(
+    [1, 3, 8, 10, 31].every((flags) =>
+      encodeKittyKeyboardEvent(cmd({ key: "v", code: "KeyV" }), flags, true) === null &&
+      encodeKittyKeyboardEvent(cmd({ key: "c", code: "KeyC" }), flags, true) === null &&
+      encodeKittyKeyboardEvent(cmd({ key: "v", code: "KeyV", type: "keyup" }), flags, true) === null &&
+      encodeKittyKeyboardEvent(cmd({ key: "Meta", code: "MetaLeft" }), flags, true) === null) &&
+      encodeKittyKeyboardEvent(cmd({ key: "v", code: "KeyV" }), 1, false) === "\x1b[118;9u",
+    "Kitty encoder swallowed macOS Cmd shortcuts or stopped encoding Super elsewhere",
+  );
   await assert(
     encodeKittyKeyboardEvent(key(), 8, false) === "\x1b[97u" &&
       encodeKittyKeyboardEvent(key({ key: "Enter", code: "Enter" }), 8, false) === "\x1b[13u" &&
