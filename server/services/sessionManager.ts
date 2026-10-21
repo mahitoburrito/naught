@@ -2223,8 +2223,24 @@ export interface RestartSessionResult {
 export function restartSession(sessionId: string, options: { resume?: boolean } = {}): RestartSessionResult {
   const session = sessions.get(sessionId);
   if (!session) return { ok: false, status: 404, error: "Session not found" };
-  if (session.pty) return { ok: false, status: 400, error: "Session already running" };
   const plan = planRelaunch(session, { resume: options.resume === true });
+  if (session.pty) {
+    // The agent can exit on its own and leave its shell running (Claude's
+    // SessionEnd hook marks the node disconnected). Relaunch in that shell.
+    if (session.status !== "disconnected") return { ok: false, status: 400, error: "Session already running" };
+    const ptyProcess = session.pty;
+    const command = injectPluginDir(resolveAgentLaunchCommand(plan.command, session.agentId), session.agentId);
+    if (!command) return { ok: false, status: 400, error: "This session has no agent command to relaunch" };
+    session.isRestored = false;
+    session.lastHookEvent = undefined;
+    session.currentTool = undefined;
+    session.preToolTime = undefined;
+    applyAgentStatus(session, "running", { source: "authoritative", immediate: true });
+    session.statusChangedAt = Date.now();
+    startTrackedCommand(sessionId, session, ptyProcess, command);
+    log(`[session] ${plan.resumed ? "Resumed" : "Relaunched"} agent in the live shell of ${sessionId}`);
+    return { ok: true, status: 200, resumed: plan.resumed };
+  }
 
   const { shell, args: shellArgs } = getSessionShellLaunch(session);
   const cwd = existsSync(session.cwd) ? session.cwd : homedir();

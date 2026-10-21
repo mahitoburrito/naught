@@ -35,7 +35,9 @@ function scenario(port, { resumeOnLaunch }) {
   mkdirSync(bin, { recursive: true });
   mkdirSync(join(claudeConfig, "projects", "-repo"), { recursive: true });
   writeFileSync(join(claudeConfig, "projects", "-repo", `${ID}.jsonl`), "{}\n");
-  writeFileSync(join(bin, "claude"), `#!/bin/sh\necho "$*" >> '${argvLog}'\nexec sleep 600\n`);
+  const stopFile = join(root, "stop-claude");
+  // Records its argv, then runs until the test asks it to exit, like Claude ending a session.
+  writeFileSync(join(bin, "claude"), `#!/bin/sh\necho "$*" >> '${argvLog}'\nwhile [ ! -f '${stopFile}' ]; do sleep 0.2; done\nrm -f '${stopFile}'\n`);
   chmodSync(join(bin, "claude"), 0o755);
   const node = (id, extra) => ({ nodeId: `node-${id}`, sessionId: `session-${id}`, cwd: root, createdAt: new Date().toISOString(), position: { x: 0, y: 0 }, ...extra });
   writeFileSync(join(data, "state.json"), JSON.stringify({ version: 2, savedAt: Date.now(), nodes: [
@@ -59,7 +61,8 @@ function scenario(port, { resumeOnLaunch }) {
   const savedNode = (id) => {
     try { return JSON.parse(readFileSync(join(data, "state.json"), "utf8")).nodes.find((n) => n.sessionId === id); } catch { return null; }
   };
-  return { api, sessions, argv, stop, savedNode, stderr: () => stderr };
+  const exitClaude = () => writeFileSync(stopFile, "");
+  return { api, sessions, argv, stop, savedNode, exitClaude, stderr: () => stderr };
 }
 
 console.log("manual resume");
@@ -80,6 +83,16 @@ console.log("manual resume");
     check("a shell node relaunches without resuming", [shell.status, shell.body?.resumed], [200, false]);
     const again = await s.api("/sessions/session-claude/restart", { method: "POST", body: JSON.stringify({ resume: true }) });
     check("a running session is not relaunched twice", again.status, 400);
+    // Claude exits on its own while its shell keeps running; the node shows offline.
+    s.exitClaude();
+    await sleep(1500);
+    await s.api("/status-update", { method: "POST", body: JSON.stringify({ status: "disconnected", openuiSessionId: "session-claude", claudeSessionId: ID, hookEvent: "SessionEnd" }) });
+    const offline = await waitFor(async () => { const l = await s.sessions(); const c = l?.find((x) => x.sessionId === "session-claude"); return c?.status === "disconnected" ? c : null; }, "agent-exited node offline");
+    check("an exited agent with a live shell is offered a resume", offline.resumable, true);
+    const relaunch = await s.api("/sessions/session-claude/restart", { method: "POST", body: JSON.stringify({ resume: true }) });
+    check("resume works while the shell is still alive", [relaunch.status, relaunch.body?.resumed], [200, true]);
+    const twice = await waitFor(() => (s.argv().length >= 2 ? s.argv() : null), "claude relaunched in the live shell").catch(() => s.argv());
+    check("claude ran again in the same shell with --resume", [twice.length, (twice[1] || "").endsWith(`--resume ${ID}`)], [2, true]);
     const NEXT = "9a8b7c6d-1111-4222-8333-944455566677";
     const hook = (hookEvent) => s.api("/status-update", { method: "POST", body: JSON.stringify({ status: hookEvent === "SessionEnd" ? "idle" : "running", openuiSessionId: "session-claude", claudeSessionId: NEXT, hookEvent }) });
     await hook("SessionStart");

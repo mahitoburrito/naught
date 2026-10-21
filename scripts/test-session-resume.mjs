@@ -38,6 +38,17 @@ console.log("agentResume");
   check("-r, --continue and -c are dropped", r.buildResumeCommand("claude -r old -c --continue --verbose", "claude", ID), `claude --verbose --resume ${ID}`);
   check("--resume=value form is dropped", r.buildResumeCommand("claude --resume=old", "claude", ID), `claude --resume ${ID}`);
   check("an unsafe id leaves the command alone", r.buildResumeCommand("claude", "claude", "x; y"), null);
+  check("quoted text that mentions a flag is left intact", r.buildResumeCommand('claude --append-system-prompt "Never use --continue here"', "claude", ID), `claude --append-system-prompt "Never use --continue here" --resume ${ID}`);
+  check("a quoted multi-word --resume value is removed whole", r.buildResumeCommand('claude --resume "old id" --model opus', "claude", ID), `claude --model opus --resume ${ID}`);
+  check("bare -r before another flag keeps that flag", r.buildResumeCommand("claude -r --model opus", "claude", ID), `claude --model opus --resume ${ID}`);
+  check("bare --resume at the end", r.buildResumeCommand("claude --resume", "claude", ID), `claude --resume ${ID}`);
+  check("single quotes survive", r.buildResumeCommand("claude --append-system-prompt 'a b'", "claude", ID), `claude --append-system-prompt 'a b' --resume ${ID}`);
+  check("an absolute path to claude is recognised", r.buildResumeCommand("/usr/local/bin/claude --model opus", "claude", ID), `/usr/local/bin/claude --model opus --resume ${ID}`);
+  check("a profile that runs claude resumes", r.buildResumeCommand("claude --model opus", "profile:reviewer", ID), `claude --model opus --resume ${ID}`);
+  check("a profile that runs codex does not", r.buildResumeCommand("codex", "profile:reviewer", ID), null);
+  check("isClaudeCommand: profile running claude", r.isClaudeCommand("claude --verbose", "profile:x"), true);
+  check("isClaudeCommand: codex agent", r.isClaudeCommand("codex", "codex"), false);
+  check("isClaudeCommand: ssh wrapper", r.isClaudeCommand("ssh box -t 'exec claude'", "claude"), false);
   check("codex is not resumed by id", r.buildResumeCommand("codex", "codex", ID), null);
   check("a devbox ssh command is not touched", r.buildResumeCommand("ssh box -t 'cd /x && exec claude'", "claude", ID), null);
   check("a shell node is not touched", r.buildResumeCommand("", "shell", ID), null);
@@ -57,6 +68,8 @@ console.log("agentResume");
   check("codex relaunches fresh", plan({ agentId: "codex", command: "codex", resumeSessionId: ID }, { resume: true }), { command: "codex", resumed: false });
   check("claude config dir defaults from CLAUDE_CONFIG_DIR", r.defaultClaudeConfigDir({ CLAUDE_CONFIG_DIR: "/tmp/cc", HOME: "/home/u" }), "/tmp/cc");
   check("claude config dir defaults to ~/.claude", r.defaultClaudeConfigDir({ HOME: "/home/u" }), "/home/u/.claude");
+  const { homedir } = await import("os");
+  check("claude config dir falls back to the OS home when HOME is unset", r.defaultClaudeConfigDir({}), join(homedir(), ".claude"));
   rmSync(config, { recursive: true, force: true });
 }
 

@@ -1,4 +1,4 @@
-import { isResumableSessionId } from "../services/agentResume";
+import { isClaudeCommand, isResumableSessionId } from "../services/agentResume";
 import { Hono } from "hono";
 import * as pty from "node-pty";
 import { readdirSync, statSync, writeFileSync, mkdirSync, existsSync, readFileSync, renameSync, rmSync } from "fs";
@@ -1971,7 +1971,7 @@ apiRoutes.get("/sessions", (c) => {
     agentProfileVersion: session.agentProfileVersion,
     agentPermissionPolicy: session.agentPermissionPolicy,
     agentModel: session.agentModel,
-    resumable: !session.pty && session.agentId === "claude" && isResumableSessionId(session.resumeSessionId),
+    resumable: session.status === "disconnected" && isClaudeCommand(session.command, session.agentId) && isResumableSessionId(session.resumeSessionId),
     terminalCols: session.terminalCols,
     terminalRows: session.terminalRows,
   }));
