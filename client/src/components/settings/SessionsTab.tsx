@@ -18,6 +18,8 @@ export function SessionsTab({
   setCreateWorktree,
   autoCareful,
   setAutoCareful,
+  resumeSessionsOnLaunch,
+  setResumeSessionsOnLaunch,
 }: {
   defaultStartingDirectory: string;
   setDefaultStartingDirectory: (v: string) => void;
@@ -33,6 +35,8 @@ export function SessionsTab({
   setCreateWorktree: (v: boolean) => void;
   autoCareful: boolean;
   setAutoCareful: (v: boolean) => void;
+  resumeSessionsOnLaunch: boolean;
+  setResumeSessionsOnLaunch: (v: boolean) => void;
 }) {
   const { agents, launchCwd } = useStore();
 
@@ -124,6 +128,19 @@ export function SessionsTab({
             <span>Leave empty to launch sessions with no prompt.</span>
             <span>{defaultInitialPrompt.length}/4000</span>
           </div>
+        </div>
+      </div>
+
+      <SectionHeader title="On launch" />
+      <div className="rounded-lg border border-border bg-canvas/40">
+        <div className="px-4">
+          <SettingRow
+            title="Resume sessions on launch"
+            description="Relaunch every saved session when OpenUI opens. Claude sessions pick their conversation back up; others start fresh in the same folder."
+            last
+          >
+            <Toggle checked={resumeSessionsOnLaunch} onChange={setResumeSessionsOnLaunch} />
+          </SettingRow>
         </div>
       </div>
 

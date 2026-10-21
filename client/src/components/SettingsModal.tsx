@@ -50,6 +50,7 @@ export function SettingsModal({ open, onClose }: SettingsModalProps) {
   const [createWorktree, setCreateWorktree] = useState(false);
   const [ticketPromptTemplate, setTicketPromptTemplate] = useState("");
   const [autoCareful, setAutoCareful] = useState(false);
+  const [resumeSessionsOnLaunch, setResumeSessionsOnLaunch] = useState(false);
   const [defaultStartingDirectory, setDefaultStartingDirectory] = useState("");
   const [rememberLastDirectory, setRememberLastDirectory] = useState(true);
   const [defaultAgentId, setDefaultAgentId] = useState("");
@@ -94,6 +95,7 @@ export function SettingsModal({ open, onClose }: SettingsModalProps) {
           setDefaultBaseBranch(config.defaultBaseBranch || "main");
           setCreateWorktree(config.createWorktree ?? false);
           setAutoCareful(config.autoCareful ?? false);
+          setResumeSessionsOnLaunch(config.resumeSessionsOnLaunch ?? false);
           setTicketPromptTemplate(config.ticketPromptTemplate || "");
           setDefaultStartingDirectory(config.defaultStartingDirectory || "");
           setRememberLastDirectory(config.rememberLastDirectory ?? true);
@@ -148,6 +150,7 @@ export function SettingsModal({ open, onClose }: SettingsModalProps) {
           defaultBaseBranch,
           createWorktree,
           autoCareful,
+          resumeSessionsOnLaunch,
           ticketPromptTemplate: ticketPromptTemplate || undefined,
           defaultStartingDirectory,
           rememberLastDirectory,
@@ -338,6 +341,8 @@ export function SettingsModal({ open, onClose }: SettingsModalProps) {
                       setCreateWorktree={setCreateWorktree}
                       autoCareful={autoCareful}
                       setAutoCareful={setAutoCareful}
+                      resumeSessionsOnLaunch={resumeSessionsOnLaunch}
+                      setResumeSessionsOnLaunch={setResumeSessionsOnLaunch}
                     />}
                     {tab === "devboxes" && <DevboxesTab />}
                     {tab === "appearance" && <AppearanceTab
