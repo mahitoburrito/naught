@@ -244,7 +244,7 @@ export async function startServer(): Promise<number> {
       if (session.isRestored || !session.pty) {
         sendTerminalMessage(ws, {
           type: "output",
-          data: "\r\n\x1b[38;5;245mSaved scrollback restored. The process is disconnected.\r\nClick \"Spawn Fresh\" to start it again.\x1b[0m\r\n"
+          data: "\r\n\x1b[38;5;245mSaved scrollback restored. The process is disconnected.\r\nClick \"Resume\" or \"Relaunch\" to start it again.\x1b[0m\r\n"
         });
       }
 
