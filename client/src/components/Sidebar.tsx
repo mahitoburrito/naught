@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from "react";
+import { resumeSession } from "../utils/resumeSession";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   X,
@@ -7,6 +8,7 @@ import {
   Folder,
   Edit3,
   RotateCcw,
+  Play,
   Sparkles,
   Code,
   Cpu,
@@ -150,6 +152,17 @@ export function Sidebar() {
     setSidebarOpen(false);
     setSelectedNodeId(null);
     setIsEditing(false);
+  };
+
+  const [resumeError, setResumeError] = useState<string | null>(null);
+  const [isResuming, setIsResuming] = useState(false);
+  const handleResume = async () => {
+    if (!session || !selectedNodeId) return;
+    setIsResuming(true);
+    setResumeError(null);
+    const result = await resumeSession(session.sessionId, selectedNodeId);
+    setIsResuming(false);
+    if (!result.ok) setResumeError(result.error || "Could not resume this session");
   };
 
   const handleNewSession = () => {
@@ -326,8 +339,25 @@ export function Sidebar() {
                   <p className="text-sm font-medium" style={{ color: AGENT_STATUS.disconnected.color }}>
                     Session {AGENT_STATUS.disconnected.label}
                   </p>
-                  <p className="text-xs text-zinc-400 mt-0.5">The agent was stopped. Start a new session.</p>
+                  <p className="text-xs text-zinc-400 mt-0.5">
+                    {session.resumable
+                      ? "The agent was stopped. Resume picks the conversation back up where it left off."
+                      : "The agent was stopped. Relaunch it here, or start a new session."}
+                  </p>
+                  {resumeError && <p className="text-xs text-red-400 mt-1">{resumeError}</p>}
                 </div>
+                <button
+                  onClick={handleResume}
+                  disabled={isResuming}
+                  className="w-full flex items-center justify-center gap-2 px-3 py-1.5 rounded-md border text-sm font-medium text-zinc-100 transition-colors hover:brightness-125 disabled:opacity-60"
+                  style={{
+                    backgroundColor: AGENT_STATUS.disconnected.bg,
+                    borderColor: AGENT_STATUS.disconnected.border,
+                  }}
+                >
+                  {isResuming ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Play className="w-3.5 h-3.5" />}
+                  {session.resumable ? "Resume conversation" : "Relaunch"}
+                </button>
                 <button
                   onClick={handleNewSession}
                   className="w-full flex items-center justify-center gap-2 px-3 py-1.5 rounded-md border text-sm font-medium text-zinc-100 transition-colors hover:brightness-125"

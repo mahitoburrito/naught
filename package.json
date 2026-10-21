@@ -51,7 +51,8 @@
     "postinstall": "npm ci --prefix client && node scripts/fix-node-pty-permissions.mjs",
     "test:teardown": "npm run build:electron && node scripts/smoke-session-teardown.mjs",
     "test:devboxes": "npm run build:electron && node scripts/test-devboxes.mjs",
-    "test:coordinator-agent": "npm run build:electron && node scripts/test-coordinator-agent.mjs"
+    "test:coordinator-agent": "npm run build:electron && node scripts/test-coordinator-agent.mjs",
+    "test:resume": "npm run build:electron && node scripts/test-session-resume.mjs && node scripts/smoke-session-resume.mjs"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.133.0",
