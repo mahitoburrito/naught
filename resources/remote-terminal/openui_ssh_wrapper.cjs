@@ -19,7 +19,24 @@ for (const name of [
   "OPENUI_SSH_WRAPPER",
   "OPENUI_REMOTE_ASSET_DIR",
   "OPENUI_NODE_RUNTIME",
+  "OPENUI_REMOTE_HOOKS_PORT",
 ]) delete sshEnvironment[name];
+
+// `ssh -R 0:...` reports the port sshd picked on stderr; that port is what the
+// status hooks on the far side post to.
+function parseAllocatedPort(text) {
+  const match = /Allocated port (\d+) for remote forward/.exec(String(text || ""));
+  if (!match) return null;
+  const port = Number(match[1]);
+  return Number.isInteger(port) && port > 0 && port <= 65535 ? port : null;
+}
+
+function hooksPort() {
+  const raw = process.env.OPENUI_REMOTE_HOOKS_PORT || "";
+  if (!/^\d{1,5}$/.test(raw)) return null;
+  const port = Number(raw);
+  return port > 0 && port <= 65535 ? port : null;
+}
 
 const VALUE_OPTIONS = new Set("BbcDEeFIiJLlmOopQRSWw");
 const UNSUPPORTED_FLAGS = new Set("fGMNnQqstTVWw");
@@ -220,17 +237,27 @@ function main() {
 
   const controlPath = join(controlDirectory, `c-${randomBytes(8).toString("hex")}`);
   metadata("connecting", { target: parsed.destination, controlPath });
-  const master = run(realSsh, [
+  const forwardPort = hooksPort();
+  const masterArgs = [
     "-M", "-N", "-f",
     "-S", controlPath,
     "-o", "ControlPersist=600",
     "-o", "ExitOnForwardFailure=yes",
+    ...(forwardPort ? ["-R", `0:127.0.0.1:${forwardPort}`] : []),
     ...parsed.masterOptions,
     parsed.destination,
-  ]);
+  ];
+  // stderr is captured only to read the allocated port; everything is echoed
+  // back so host-key and auth messages still reach the terminal.
+  const master = run(realSsh, masterArgs, forwardPort ? { stdio: ["inherit", "inherit", "pipe"], encoding: "utf8" } : {});
+  if (forwardPort && master && master.stderr) process.stderr.write(master.stderr);
   if (finish(master) !== 0) {
     metadata("fallback", { reason: "master_failed" });
     return finish(run(realSsh, args));
+  }
+  if (forwardPort) {
+    const allocated = parseAllocatedPort(master.stderr);
+    if (allocated) metadata("tunnel", { controlPath, port: allocated });
   }
 
   let assets;
@@ -278,4 +305,8 @@ function main() {
   return finish(result);
 }
 
-process.exit(main());
+if (require.main === module) {
+  process.exit(main());
+} else {
+  module.exports = { parseAllocatedPort, parseInteractiveInvocation };
+}

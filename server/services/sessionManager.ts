@@ -38,6 +38,9 @@ import { reapProcessTreeDetached } from "./processTree";
 import { TerminalLifecycle } from "./terminalLifecycle";
 import { terminalFind, type TerminalFindBlockIndexEntry } from "./terminalFind";
 import { sendTerminalMessage } from "./terminalTransport";
+import { naughtCliSourcePath } from "./compute/bootstrap";
+import { buildDevboxLaunch, buildDevboxLaunchCommand, getDevbox } from "./devboxes";
+import type { DevboxConfig } from "../types";
 import {
   applyAgentStatus,
   disposeAgentStatus,
@@ -156,6 +159,29 @@ export function getDefaultShellLaunch(): { shell: string; args: string[] } {
   return launch;
 }
 
+/** Session markers set by a running Claude Code for its own children. Config such as CLAUDE_CODE_OAUTH_TOKEN is kept. */
+const INHERITED_AGENT_SESSION_KEYS = new Set([
+  "CLAUDECODE",
+  "CLAUDE_PID",
+  "CLAUDE_EFFORT",
+  "CLAUDE_CODE_ENTRYPOINT",
+  "CLAUDE_CODE_SESSION_ID",
+  "CLAUDE_CODE_CHILD_SESSION",
+  "CLAUDE_CODE_SESSION_ATTENDED",
+  "CLAUDE_CODE_SSE_PORT",
+  "CLAUDE_CODE_EXECPATH",
+  "CLAUDE_CODE_MESSAGING_SOCKET",
+  "CLAUDE_CODE_MESSAGING_TOKEN",
+]);
+
+export function stripInheritedAgentSession(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const out: NodeJS.ProcessEnv = {};
+  for (const [key, value] of Object.entries(env)) {
+    if (!INHERITED_AGENT_SESSION_KEYS.has(key)) out[key] = value;
+  }
+  return out;
+}
+
 export function getPtyEnvironment(
   sessionId: string,
   profile?: {
@@ -165,10 +191,17 @@ export function getPtyEnvironment(
     allowedTools?: string[];
     manifestPath?: string;
     model?: string;
+    /** Devbox sessions: ask the ssh shim to open a reverse tunnel for status hooks. */
+    remoteHooks?: boolean;
   },
 ): Record<string, string> {
   // NO_COLOR makes agent CLIs monochrome even though xterm supports full ANSI.
-  const { NO_COLOR: _noColor, ...rest } = process.env;
+  const { NO_COLOR: _noColor, ...inherited } = process.env;
+  // When Naught itself was started from inside a Claude Code session, that
+  // session's markers ride along in process.env. A Claude launched in a Naught
+  // session would then think it is a child of the outer one and, among other
+  // things, turn transcript saving off, which leaves nothing to resume or move.
+  const rest = stripInheritedAgentSession(inherited);
   const shimEnvironment = prepareShellShimEnvironment(sessionId, rest as Record<string, string | undefined>);
   return {
     ...rest,
@@ -186,6 +219,7 @@ export function getPtyEnvironment(
     ...(profile?.allowedTools?.length ? { OPENUI_ALLOWED_TOOLS: profile.allowedTools.join(",") } : {}),
     ...(profile?.manifestPath ? { OPENUI_AGENT_PROFILE_PATH: profile.manifestPath } : {}),
     ...(profile?.model ? { OPENUI_AGENT_MODEL: profile.model } : {}),
+    ...(profile?.remoteHooks ? { OPENUI_REMOTE_HOOKS_PORT: String(serverPort) } : {}),
   } as Record<string, string>;
 }
 
@@ -197,6 +231,7 @@ export function getSessionPtyEnvironment(sessionId: string, session: Session): R
     allowedTools: session.agentAllowedTools,
     manifestPath: session.agentRuntimeManifestPath,
     model: session.agentModel,
+    remoteHooks: !!session.devboxId,
   });
 }
 
@@ -323,6 +358,103 @@ async function validGitBranchName(cwd: string, branchName: string): Promise<bool
   } catch {
     return false;
   }
+}
+
+export interface SessionLaunchPlan {
+  /** Typed into the local shell first. */
+  local: string;
+  /** The agent command as the user sees it (remote or local). */
+  agentCommand: string;
+  /** Present for devbox sessions launched through the instrumented path. */
+  remote?: { devbox: DevboxConfig; agentCommand: string; remotePath?: string };
+}
+
+/**
+ * What to type to start a session. Local sessions pin the agent executable
+ * and inject the plugin; devbox sessions connect bare and run the agent on
+ * the far side once the shell is up (see dispatchRemoteLaunch). A persisted
+ * session whose command is already an `ssh … -t` wrapper (pre-instrumented
+ * launches) runs as it is.
+ */
+export function planSessionLaunch(sessionId: string, session: Session): SessionLaunchPlan {
+  const command = session.command || "";
+  const devbox = session.devboxId ? getDevbox(session.devboxId) : null;
+  if (devbox && !/^ssh\s/.test(command.trim())) {
+    if (terminalRemoteManager.hasRuntime(sessionId)) {
+      const launch = buildDevboxLaunch(devbox, command, session.remotePath);
+      return { local: launch.launch, agentCommand: command, remote: { devbox, agentCommand: command, remotePath: session.remotePath } };
+    }
+    return { local: buildDevboxLaunchCommand(devbox, command, session.remotePath), agentCommand: command };
+  }
+  return { local: injectPluginDir(resolveAgentLaunchCommand(command, session.agentId), session.agentId), agentCommand: command };
+}
+
+const REMOTE_READY_POLL_MS = 200;
+const REMOTE_READY_TIMEOUT_MS = 12_000;
+
+export type RemoteLaunchState = "pending" | "remote" | "failed";
+const remoteLaunchStates = new Map<string, { state: RemoteLaunchState; error?: string }>();
+
+/** Whether the last devbox launch of this session actually reached the remote shell. */
+export function remoteLaunchState(sessionId: string): { state: RemoteLaunchState; error?: string } | undefined {
+  return remoteLaunchStates.get(sessionId);
+}
+
+/**
+ * Waits for the ssh shim to report the remote shell (connected, or fallen
+ * back to a plain shell) and then types the agent command there. Resolves
+ * true once typed, false when the PTY went away first.
+ */
+export function dispatchRemoteLaunch(
+  sessionId: string,
+  session: Session,
+  ptyProcess: pty.IPty,
+  remote: NonNullable<SessionLaunchPlan["remote"]>,
+): Promise<boolean> {
+  const startedAt = Date.now();
+  remoteLaunchStates.set(sessionId, { state: "pending" });
+  return new Promise((resolve) => {
+    const attempt = () => {
+      if (sessions.get(sessionId) !== session || session.pty !== ptyProcess) {
+        remoteLaunchStates.set(sessionId, { state: "failed", error: "the terminal went away before the remote shell was up" });
+        resolve(false);
+        return;
+      }
+      const state = terminalRemoteManager.snapshot(sessionId)?.state;
+      const elapsed = Date.now() - startedAt;
+      // The ssh command still running means a remote shell is on the other
+      // end even when the shim did not instrument it. A finished one means
+      // ssh failed and we are back at the LOCAL prompt: typing the agent
+      // command there would run it on this machine, so stop instead.
+      // Once the shim reports a connection in progress, the prompt we see is
+      // the node's own shell; only with no remote state at all can a prompt
+      // mean we are back on this machine.
+      const remoteInProgress = state === "connecting" || state === "initializing" || state === "reconnecting";
+      const phase = getTerminalSnapshot(sessionId, false)?.phase;
+      const sshExited = !remoteInProgress && elapsed > 1_500 && (phase === "at_prompt" || phase === "awaiting_prompt");
+      if (state !== "connected" && state !== "fallback" && sshExited) {
+        const error = `could not reach ${remote.devbox.name}: ssh exited (see the terminal)`;
+        remoteLaunchStates.set(sessionId, { state: "failed", error });
+        logError(`[devbox] ${sessionId}: ${error}`);
+        resolve(false);
+        return;
+      }
+      const settled = state === "connected" || state === "fallback" || elapsed >= REMOTE_READY_TIMEOUT_MS;
+      if (!settled) {
+        setTimeout(attempt, REMOTE_READY_POLL_MS);
+        return;
+      }
+      remoteLaunchStates.set(sessionId, { state: "remote" });
+      const port = terminalRemoteManager.hookPort(sessionId);
+      const launch = buildDevboxLaunch(remote.devbox, remote.agentCommand, remote.remotePath, {
+        hooks: port ? { port, sessionId } : undefined,
+      });
+      log(`[devbox] ${sessionId}: remote shell ${state || "unknown"}${port ? ` (hooks via port ${port})` : " (no hook tunnel)"}; starting agent`);
+      writeTerminalData(sessionId, launch.remote, { kind: "automation", bracketedPaste: true, submit: true });
+      resolve(true);
+    };
+    attempt();
+  });
 }
 
 // Create a git worktree for a branch
@@ -1205,6 +1337,26 @@ function getTerminalResourceRoot(): string | null {
   ) || null;
 }
 
+/**
+ * Where ssh control sockets live. A unix socket path is capped at 104 bytes on
+ * macOS, and ssh appends a 17-character temporary suffix while creating the
+ * master. The per-user TMPDIR there (/var/folders/xx/.../T/, ~49 bytes) leaves
+ * too little room, so the master failed and every instrumented ssh fell back
+ * to a plain one. A short owner-only directory under /tmp stays well inside.
+ */
+export function sshControlDirectoryPrefix(safeId: string, platform: NodeJS.Platform = process.platform, base: string = tmpdir()): string {
+  const uid = typeof process.getuid === "function" ? process.getuid() : 0;
+  const root = platform === "darwin" || base.length > 24 ? "/tmp" : base;
+  return join(root, `nssh-${uid}-${safeId.slice(0, 6)}-`);
+}
+
+export function stripShimDirectories(pathValue: string): string {
+  return pathValue
+    .split(delimiter)
+    .filter((directory) => directory && !/[\\/]runtime-shell-shims[\\/]/.test(`${directory}/`))
+    .join(delimiter);
+}
+
 function executableOnPath(name: string, pathValue: string): string | null {
   for (const directory of pathValue.split(delimiter)) {
     if (!directory) continue;
@@ -1363,7 +1515,10 @@ export function prepareShellShimEnvironment(
     return {};
   }
 
-  const originalPath = baseEnvironment.PATH || process.env.PATH || "/usr/local/bin:/usr/bin:/bin";
+  // A Naught started from inside a Naught session inherits that session's shim
+  // directory on PATH. Resolving through it would make the outer shim this
+  // session's "real" ssh, and the nested wrappers then refuse to run.
+  const originalPath = stripShimDirectories(baseEnvironment.PATH || process.env.PATH || "/usr/local/bin:/usr/bin:/bin");
   const subshellPolicies = loadSubshellPolicies(home);
   let created = 0;
 
@@ -1529,12 +1684,23 @@ export function prepareShellShimEnvironment(
     }
   }
 
+  // The agent-facing CLI. Sessions reach the server through OPENUI_PORT,
+  // which rides in the PTY environment already.
+  const naughtCli = naughtCliSourcePath();
+  if (naughtCli && isAbsolute(process.execPath)) {
+    writePrivateRuntimeFile(join(shimDirectory, "naught"), [
+      "#!/bin/sh",
+      `ELECTRON_RUN_AS_NODE=1 exec ${quotePosix(process.execPath)} ${quotePosix(naughtCli)} "$@"`,
+    ].join("\n"), true);
+    created++;
+  }
+
   const realSsh = executableOnPath("ssh", originalPath);
   const remoteAssetVersion = resourceRoot ? terminalRemoteAssetVersion(resourceRoot) : null;
   let remoteEnvironment: Record<string, string> = {};
   if (realSsh && resourceRoot && remoteAssetVersion && isAbsolute(process.execPath)) {
     try {
-      const controlDirectory = mkdtempSync(join(tmpdir(), `openui-ssh-${safeId.slice(0, 8)}-`));
+      const controlDirectory = mkdtempSync(sshControlDirectoryPrefix(safeId));
       chmodSync(controlDirectory, 0o700);
       const token = randomBytes(32).toString("hex");
       const wrapper = join(resourceRoot, "remote-terminal", "openui_ssh_wrapper.cjs");
@@ -1988,6 +2154,7 @@ export async function createSession(params: {
         allowedTools: agentAllowedTools,
         manifestPath: agentRuntimeManifestPath,
         model: agentModel,
+        remoteHooks: !!devboxId,
       }),
       cols: preferredTerminalSize().cols,
       rows: preferredTerminalSize().rows,
@@ -2059,8 +2226,9 @@ export async function createSession(params: {
   startAgentStatusTicker(sessionId, session, sessions);
 
   // Run the command
-  const finalCommand = injectPluginDir(resolveAgentLaunchCommand(command, agentId), agentId);
-  const isClaudeCommand = commandExecutableName(finalCommand) === "claude";
+  const launchPlan = planSessionLaunch(sessionId, session);
+  const finalCommand = launchPlan.local;
+  const isClaudeCommand = commandExecutableName(launchPlan.agentCommand) === "claude";
   const ownsCurrentPty = () =>
     sessions.get(sessionId) === session && session.pty === ptyProcess;
   if (finalCommand) log(`[pty-write] Writing command: ${finalCommand}`);
@@ -2085,7 +2253,18 @@ export async function createSession(params: {
       return;
     }
     if (!startTrackedCommand(sessionId, session, ptyProcess, finalCommand)) return;
+    if (launchPlan.remote) {
+      // The agent starts only once the remote shell is up; everything typed
+      // afterwards waits for that moment too.
+      void dispatchRemoteLaunch(sessionId, session, ptyProcess, launchPlan.remote).then((typed) => {
+        if (typed) scheduleFollowUps();
+      });
+      return;
+    }
+    scheduleFollowUps();
+  };
 
+  const scheduleFollowUps = () => {
     // Enable /careful for Claude Code sessions on startup (opt-in; off by default)
     if (isClaudeCommand && autoCareful === true) {
       setTimeout(() => {
@@ -2151,6 +2330,88 @@ export async function createSession(params: {
 
   log(`[session] Created ${sessionId} for ${agentName}${ticketId ? ` (ticket: ${ticketId})` : ""}`);
   return { session, cwd: workingDir, gitBranch: gitBranch || undefined };
+}
+
+/**
+ * Re-spawns a session's PTY in place and runs its command again, with
+ * optional overrides (a move sets the devbox and the resume command). The
+ * old PTY must be gone; a live session is refused.
+ */
+export async function relaunchSession(
+  sessionId: string,
+  overrides: { command?: string; devboxId?: string | null; remotePath?: string | null; cwd?: string } = {},
+): Promise<{ ok: true } | { ok: false; status: 400 | 404 | 500; error: string }> {
+  const session = sessions.get(sessionId);
+  if (!session) return { ok: false, status: 404, error: "Session not found" };
+  if (session.pty) return { ok: false, status: 400, error: "Session already running" };
+
+  if (overrides.command !== undefined) session.command = overrides.command;
+  if (overrides.devboxId !== undefined) session.devboxId = overrides.devboxId || undefined;
+  if (overrides.remotePath !== undefined) session.remotePath = overrides.remotePath || undefined;
+  if (overrides.cwd) session.cwd = overrides.cwd;
+
+  const { shell, args: shellArgs } = getSessionShellLaunch(session);
+  const cwd = existsSync(session.cwd) ? session.cwd : homedir();
+
+  let ptyProcess: pty.IPty;
+  try {
+    ptyProcess = pty.spawn(shell, shellArgs, {
+      name: "xterm-256color",
+      cwd,
+      env: getSessionPtyEnvironment(sessionId, session),
+      cols: session.terminalCols || DEFAULT_PTY_COLS,
+      rows: session.terminalRows || DEFAULT_PTY_ROWS,
+    });
+  } catch (e: any) {
+    // Probe Agent Error Log Trigger
+    logError(`[PRBE_ERROR_4hw6OQ] [session] Failed to restart PTY (shell=${shell}, cwd=${cwd}): ${e.message}`);
+    return { ok: false, status: 500, error: `Failed to spawn terminal: ${e.message}` };
+  }
+
+  session.pty = ptyProcess;
+  session.isRestored = false;
+  // Existing clients will receive this PTY epoch live. If none are attached,
+  // let the first future renderer reconstruct it from the bounded raw buffer.
+  session.terminalClientConnected = session.clients.size > 0;
+  session.lastOutputTime = Date.now();
+  session.cwd = cwd;
+  session.shellLaunch = { shell, args: [...shellArgs] };
+  resetTerminalLifecycle(sessionId, cwd);
+  session.agentFallbackIndex = 0;
+  session.agentAttemptCommand = undefined;
+  session.agentAttemptBlockId = undefined;
+  session.agentAttemptStartedAt = undefined;
+
+  startAgentStatusTicker(sessionId, session, sessions);
+
+  // Reset plugin status tracking for a fresh process. Everything createSession
+  // initialises has to be reset here too, or the new PTY inherits the old
+  // one's inference state.
+  session.pluginReportedStatus = false;
+  session.lastPluginStatusTime = undefined;
+  session.lastHookEvent = undefined;
+  session.claudeSessionId = undefined;
+  session.transcriptPath = undefined;
+  session.currentTool = undefined;
+  session.preToolTime = undefined;
+  session.recentOutputSize = 0;
+  applyAgentStatus(session, "running", { source: "authoritative", immediate: true });
+  session.statusChangedAt = Date.now();
+
+  attachSessionPty(sessionId, session, ptyProcess, "Restarted PTY");
+
+  const plan = planSessionLaunch(sessionId, session);
+  setTimeout(() => {
+    if (session.pty === ptyProcess) installShellIntegration(sessionId, session, ptyProcess, shell);
+  }, 150);
+  setTimeout(() => {
+    if (!plan.local || session.pty !== ptyProcess) return;
+    if (!startTrackedCommand(sessionId, session, ptyProcess, plan.local)) return;
+    if (plan.remote) void dispatchRemoteLaunch(sessionId, session, ptyProcess, plan.remote);
+  }, 450);
+
+  log(`[session] Restarted ${sessionId}${session.devboxId ? ` on devbox ${session.devboxId}` : ""}`);
+  return { ok: true };
 }
 
 export function deleteSession(sessionId: string) {
@@ -2231,6 +2492,9 @@ export async function restoreSessions() {
       command: node.command,
       cwd: node.cwd,
       originalCwd: node.originalCwd,
+      devboxId: node.devboxId,
+      remotePath: node.remotePath,
+      move: node.move,
       gitBranch: gitBranch || undefined,
       createdAt: node.createdAt,
       clients: new Set(),

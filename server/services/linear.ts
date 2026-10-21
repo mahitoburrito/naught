@@ -86,7 +86,9 @@ export function loadConfig(): LinearConfig {
       config.defaultStartingDirectory = fileConfig.defaultStartingDirectory;
       config.rememberLastDirectory = fileConfig.rememberLastDirectory;
       config.defaultAgentId = fileConfig.defaultAgentId;
+      config.defaultDevboxId = fileConfig.defaultDevboxId;
       config.devboxes = Array.isArray(fileConfig.devboxes) ? fileConfig.devboxes : undefined;
+      config.compute = fileConfig.compute && typeof fileConfig.compute === "object" ? fileConfig.compute : undefined;
     }
   } catch (e) {
     console.error("Failed to load config:", e);
@@ -115,7 +117,9 @@ export function saveConfig(config: LinearConfig): void {
       defaultStartingDirectory: config.defaultStartingDirectory,
       rememberLastDirectory: config.rememberLastDirectory,
       defaultAgentId: config.defaultAgentId,
+      defaultDevboxId: config.defaultDevboxId,
       devboxes: config.devboxes,
+      compute: config.compute,
     };
     writeFileSync(getConfigFile(), JSON.stringify(fileConfig, null, 2));
   } catch (e) {

@@ -1,7 +1,7 @@
 {
   "name": "@mahitoburrito/openui-desktop",
   "version": "1.0.9",
-  "description": "AI Agent Command Center — Desktop App",
+  "description": "AI Agent Command Center \u2014 Desktop App",
   "main": "dist/electron/electron/main.js",
   "author": "mahitoburrito <mahitraj@gmail.com>",
   "license": "MIT",
@@ -22,7 +22,8 @@
   ],
   "bin": {
     "openui-desktop": "./bin/openui-desktop",
-    "openui-control": "./bin/openui-control.js"
+    "openui-control": "./bin/openui-control.js",
+    "naught": "./bin/naught.js"
   },
   "files": [
     "bin/",
@@ -51,13 +52,22 @@
     "postinstall": "npm ci --prefix client && node scripts/fix-node-pty-permissions.mjs",
     "test:teardown": "npm run build:electron && node scripts/smoke-session-teardown.mjs",
     "test:devboxes": "npm run build:electron && node scripts/test-devboxes.mjs",
-    "test:coordinator-agent": "npm run build:electron && node scripts/test-coordinator-agent.mjs"
+    "test:compute": "npm run build:electron && node scripts/test-compute.mjs",
+    "test:naught": "node scripts/test-naught-cli.mjs",
+    "test:manifest": "bash scripts/test-manifest-py.sh",
+    "test:move": "npm run build:electron && node scripts/test-move.mjs",
+    "test:move:docker": "npm run build:electron && node scripts/test-move-docker.mjs",
+    "smoke:compute-live": "npm run build:electron && node scripts/smoke-compute-live.mjs",
+    "smoke:move-live": "npm run build:electron && node scripts/smoke-move-live.mjs",
+    "test:coordinator-agent": "npm run build:electron && node scripts/test-coordinator-agent.mjs",
+    "smoke:agent-move-live": "npm run build:electron && node scripts/smoke-agent-move-live.mjs"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.133.0",
     "@hono/node-server": "^2.0.8",
     "electron-updater": "^6.8.9",
     "hono": "^4.12.28",
+    "modal": "^0.7.2",
     "node-pty": "^1.0.0",
     "ws": "^8.21.0",
     "yaml": "^2.9.0"
@@ -82,6 +92,7 @@
     },
     "files": [
       "bin/openui-control.js",
+      "bin/naught.js",
       "dist/**/*",
       "client/dist/**/*",
       "claude-code-plugin/**/*",

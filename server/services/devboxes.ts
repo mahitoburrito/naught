@@ -26,6 +26,7 @@ export function discoverHosts(): DiscoveredHost[] {
 
 function normalise(input: Partial<DevboxConfig>): Omit<DevboxConfig, "id"> {
   const source: DevboxConfig["source"] = input.source === "ssh-config" ? "ssh-config" : "manual";
+  // "provisioned" never comes through here: see upsertProvisionedDevbox.
   const port = Number.isInteger(input.port) && input.port! > 0 && input.port! <= 65535
     ? input.port
     : undefined;
@@ -76,6 +77,29 @@ export function getDevbox(id: string): DevboxConfig | null {
 }
 
 /**
+ * Provisioned boxes bypass `normalise`: their connection details come from a
+ * provider, and the provision record rides along. Insert or replace by id.
+ */
+export function upsertProvisionedDevbox(devbox: DevboxConfig): DevboxConfig {
+  const config = loadConfig();
+  const list = config.devboxes || [];
+  const index = list.findIndex((box) => box.id === devbox.id);
+  const stored: DevboxConfig = { ...devbox, source: "provisioned", inSshConfig: false };
+  if (index === -1) list.push(stored);
+  else list[index] = stored;
+  config.devboxes = list;
+  saveConfig(config);
+  return stored;
+}
+
+export function listProvisionedDevboxes(): Array<DevboxConfig & { provision: NonNullable<DevboxConfig["provision"]> }> {
+  return listDevboxes().filter(
+    (box): box is DevboxConfig & { provision: NonNullable<DevboxConfig["provision"]> } =>
+      box.source === "provisioned" && !!box.provision,
+  );
+}
+
+/**
  * The ssh arguments that address this box.
  *
  * An ssh-config alias is passed through bare on purpose: ssh then applies the
@@ -114,6 +138,52 @@ export function buildDevboxLaunchCommand(
     : "exec $SHELL -l";
   const remote = path ? `cd ${quoteForRemoteShell(path)} && ${inner}` : inner;
   return `ssh ${target} -t ${quoteForRemoteShell(remote)}`;
+}
+
+export interface DevboxLaunch {
+  /** Typed first: a bare `ssh <target>` the session shim instruments. */
+  launch: string;
+  /** Typed once the remote shell is up. */
+  remote: string;
+  /** The old `-t` form, for when the shim is unavailable. */
+  legacy: string;
+}
+
+function withRemotePluginDir(command: string): string {
+  const token = command.split(/\s+/)[0] || "";
+  if (token !== "claude" || command.includes("--plugin-dir")) return command;
+  return `claude --plugin-dir "$HOME/.naught/claude-code-plugin"${command.slice(token.length)}`;
+}
+
+/**
+ * The two-step launch: connect bare so the remote protocol attaches (file
+ * reads, diffs, completions), then run the agent in that shell. Hooks on the
+ * box post back through the reverse tunnel when its port is known.
+ */
+export function buildDevboxLaunch(
+  devbox: DevboxConfig,
+  agentCommand: string,
+  remotePath?: string,
+  options: { hooks?: { port: number; sessionId: string } } = {},
+): DevboxLaunch {
+  const target = buildSshTarget(devbox).map(quoteForRemoteShell).join(" ");
+  const path = (remotePath || devbox.defaultPath || "").trim();
+  const parts: string[] = [];
+  if (path) parts.push(`cd ${quoteForRemoteShell(path)} || exit 1`);
+  parts.push('[ -f "$HOME/.naught/env" ] && . "$HOME/.naught/env"');
+  parts.push('export PATH="$HOME/.naught/bin:$HOME/.local/bin:$PATH"');
+  if (options.hooks) {
+    parts.push(`export OPENUI_HOST=127.0.0.1 OPENUI_PORT=${options.hooks.port} OPENUI_SESSION_ID=${quoteForRemoteShell(options.hooks.sessionId)}`);
+  }
+  const trimmed = agentCommand.trim();
+  // A shell session stays in the instrumented remote shell (exec'ing a new
+  // login shell would drop cwd tracking, file access and git for the card).
+  if (trimmed) parts.push(`exec ${withRemotePluginDir(trimmed)}`);
+  return {
+    launch: `ssh ${target}`,
+    remote: parts.join("; "),
+    legacy: buildDevboxLaunchCommand(devbox, agentCommand, remotePath),
+  };
 }
 
 export interface DevboxTestResult {

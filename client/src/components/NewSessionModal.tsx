@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { createPortal } from "react-dom";
 import { motion, AnimatePresence } from "framer-motion";
 import {
@@ -22,6 +22,43 @@ import { useReactFlow } from "@xyflow/react";
 import { useStore, Agent, AgentSession } from "../stores/useStore";
 import { AgentIcon, getAgentAccentColor } from "./AgentIcon";
 import { canUseNativeDirectoryPicker, pickDirectoryNative } from "../utils/nativeDirectoryPicker";
+import { NewNodeForm, createNode } from "./compute/NewNodeForm";
+import type { Devbox, NodeRequest, ProvisionedNode } from "../types/compute";
+
+/** The Run-on value that means "provision a node first, then run there". */
+const NEW_NODE = "__new__";
+
+const NODE_POLL_MS = 3_000;
+
+/** Where a provision-then-launch stands; the modal stays open through all of it. */
+interface NodeFlow {
+  phase: "requesting" | "pending" | "provisioning" | "bootstrapping" | "starting" | "cancelling" | "error";
+  nodeId?: string;
+  name?: string;
+  reasons?: string[];
+  message?: string;
+}
+
+function nodeFlowFor(node: ProvisionedNode, reasons?: string[]): NodeFlow {
+  const status = node.provision.status;
+  if (status === "pending") return { phase: "pending", nodeId: node.id, name: node.name, reasons: reasons ?? node.provision.reasons };
+  // The provider reports ready (startedAt) before Naught finishes bootstrapping.
+  return { phase: node.provision.startedAt ? "bootstrapping" : "provisioning", nodeId: node.id, name: node.name };
+}
+
+function nodeFlowLabel(flow: NodeFlow): string {
+  switch (flow.phase) {
+    case "requesting": return "Requesting a node…";
+    case "pending": return "Waiting for approval in Naught…";
+    case "provisioning": return `Provisioning ${flow.name ?? "the node"}…`;
+    case "bootstrapping": return `Bootstrapping ${flow.name ?? "the node"}…`;
+    case "starting": return "Starting the session…";
+    case "cancelling": return "Cancelling…";
+    case "error": return flow.message ?? "Provisioning failed.";
+  }
+}
+
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
 interface LinearTicket {
   id: string;
@@ -197,10 +234,32 @@ export function NewSessionModal({
   const [dirBrowseLoading, setDirBrowseLoading] = useState(false);
   const [dirBrowseError, setDirBrowseError] = useState<string | null>(null);
 
-  // Devboxes: an empty devboxId means this session runs locally.
-  const [devboxes, setDevboxes] = useState<{ id: string; name: string; defaultPath?: string }[]>([]);
+  // Devboxes: an empty devboxId means this session runs locally; NEW_NODE means
+  // provision one first. Only ready provisioned nodes are offered as targets.
+  const [devboxes, setDevboxes] = useState<Devbox[]>([]);
   const [devboxId, setDevboxId] = useState("");
+  // The default devbox from Settings, applied once the devbox list has loaded
+  // so a deleted or not-ready box never gets preselected.
+  const [pendingDefaultDevboxId, setPendingDefaultDevboxId] = useState("");
   const [remotePath, setRemotePath] = useState("");
+  const [newNodeSpec, setNewNodeSpec] = useState<NodeRequest | null>(null);
+  const [nodeFlow, setNodeFlow] = useState<NodeFlow | null>(null);
+  // Set while a provision-then-launch is polling; calling it stops the loop.
+  const stopNodeFlow = useRef<(() => void) | null>(null);
+  const selectableDevboxes = devboxes.filter(
+    (box) => box.source !== "provisioned" || box.provision?.status === "ready",
+  );
+  const nodeFlowBusy = !!nodeFlow && nodeFlow.phase !== "error";
+
+  useEffect(() => {
+    if (!pendingDefaultDevboxId || devboxes.length === 0) return;
+    const box = selectableDevboxes.find((item) => item.id === pendingDefaultDevboxId);
+    if (box) {
+      setDevboxId(box.id);
+      setRemotePath(box.defaultPath || "");
+    }
+    setPendingDefaultDevboxId("");
+  }, [pendingDefaultDevboxId, devboxes]);
 
   // Session launch defaults, loaded from Settings -> Sessions
   const [defaultStartingDirectory, setDefaultStartingDirectory] = useState("");
@@ -248,6 +307,7 @@ export function NewSessionModal({
       } else {
         setSelectedAgent(null);
         setDevboxId("");
+        setPendingDefaultDevboxId("");
         setRemotePath("");
         setCwd("");
         setCustomName("");
@@ -256,6 +316,8 @@ export function NewSessionModal({
         setCount(1);
       }
       setNewSessionInitialPrompt("");
+      setNewNodeSpec(null);
+      setNodeFlow(null);
       setActiveTab("blank");
       setSelectedTicket(null);
       setSearchQuery("");
@@ -307,6 +369,7 @@ export function NewSessionModal({
             const preselected = agents.find((a) => a.id === config.defaultAgentId);
             if (preselected) setSelectedAgent(preselected);
           }
+          if (config.defaultDevboxId) setPendingDefaultDevboxId(config.defaultDevboxId);
           // An explicit prompt handed to the modal outranks the configured one.
           if (config.initialPrompt && !newSessionInitialPrompt) {
             setInitialPrompt(config.initialPrompt);
@@ -481,11 +544,19 @@ export function NewSessionModal({
   };
 
   const handleClose = () => {
+    // Closing while a node is still coming up leaves the node alone: it stays
+    // listed under Settings → Devboxes and the live-nodes indicator.
+    stopNodeFlow.current?.();
+    stopNodeFlow.current = null;
+    setNodeFlow(null);
     onClose();
   };
 
+  type LaunchTarget = { devboxId: string; remotePath?: string } | null;
+
   const handleCreate = () => {
     if (!selectedAgent) return;
+    if (devboxId === NEW_NODE && (!newNodeSpec || nodeFlowBusy)) return;
 
     const workingDir = cwd || effectiveDefaultDirectory;
     const fullCommand = selectedAgent.command
@@ -505,15 +576,17 @@ export function NewSessionModal({
         .map(r => ({ name: r.name, path: r.path, defaultBranch: r.defaultBranch })),
     } : {};
 
-    // Close modal immediately so the UI stays responsive
-    handleClose();
+    // Everything the session POSTs need is captured above, so a launch can run
+    // now (local or an existing devbox) or once a new node is ready. Resolves
+    // false when any session failed to start; the canvas card already shows
+    // that, and the new-node path reports it inline as well.
+    const launch = async (target: LaunchTarget): Promise<boolean> => {
+      const targetParams = target ? { devboxId: target.devboxId, remotePath: target.remotePath } : {};
 
-    if (isReplacing && existingSession && existingNodeId) {
-      // Show creating state on the existing node
-      updateSession(existingNodeId, { status: "creating" });
+      if (isReplacing && existingSession && existingNodeId) {
+        // Show creating state on the existing node
+        updateSession(existingNodeId, { status: "creating" });
 
-      // Fire replacement in the background
-      (async () => {
         try {
           await fetch(`/api/sessions/${existingSession.sessionId}`, { method: "DELETE" });
 
@@ -525,7 +598,7 @@ export function NewSessionModal({
               agentName: selectedAgent.name,
               command: fullCommand,
               cwd: effectiveWorkingDir,
-              ...(devboxId && { devboxId, remotePath: remotePath.trim() || undefined }),
+              ...targetParams,
               nodeId: existingNodeId,
               customName: customName || existingSession.customName,
               customColor: existingSession.customColor,
@@ -577,15 +650,17 @@ export function NewSessionModal({
               terminalCols,
               terminalRows,
             });
-          } else {
-            updateSession(existingNodeId, { status: "error" });
+            return true;
           }
+          updateSession(existingNodeId, { status: "error" });
+          return false;
         } catch (error) {
           console.error("Failed to create session:", error);
           updateSession(existingNodeId, { status: "error" });
+          return false;
         }
-      })();
-    } else {
+      }
+
       // Creating new agent(s) — add nodes immediately with "creating" status
       const viewport = reactFlowInstance.getViewport();
       const viewportBounds = document.querySelector('.react-flow')?.getBoundingClientRect();
@@ -596,6 +671,7 @@ export function NewSessionModal({
       const centerY = (-viewport.y + viewportHeight / 2) / viewport.zoom;
 
       const freePositions = findFreePosition(centerX, centerY, nodes, count);
+      const results: Promise<boolean>[] = [];
 
       for (let i = 0; i < count; i++) {
         const nodeId = `node-${Date.now()}-${i}`;
@@ -639,7 +715,7 @@ export function NewSessionModal({
 
         // Fire the session creation in the background
         const agentIndex = i;
-        (async () => {
+        results.push((async () => {
           try {
             const res = await fetch("/api/sessions", {
               method: "POST",
@@ -647,11 +723,11 @@ export function NewSessionModal({
               body: JSON.stringify({
                 agentId: selectedAgent.id,
                 agentName: selectedAgent.name,
-              command: fullCommand,
-              cwd: effectiveWorkingDir,
-              ...(devboxId && { devboxId, remotePath: remotePath.trim() || undefined }),
-              nodeId,
-              customName: count > 1 ? agentName : customName || undefined,
+                command: fullCommand,
+                cwd: effectiveWorkingDir,
+                ...targetParams,
+                nodeId,
+                customName: count > 1 ? agentName : customName || undefined,
                 initialPrompt: starterPrompt || undefined,
                 ...(selectedAgent.profileId && {
                   agentProfile: {
@@ -696,16 +772,128 @@ export function NewSessionModal({
                 terminalRows,
                 status: "idle",
               });
-            } else {
-              updateSession(nodeId, { status: "error" });
+              return true;
             }
+            updateSession(nodeId, { status: "error" });
+            return false;
           } catch (error) {
             console.error("Failed to create session:", error);
             updateSession(nodeId, { status: "error" });
+            return false;
           }
-        })();
+        })());
       }
+
+      return (await Promise.all(results)).every(Boolean);
+    };
+
+    if (devboxId === NEW_NODE && newNodeSpec) {
+      void provisionThenLaunch(newNodeSpec, launch);
+      return;
     }
+
+    // Close modal immediately so the UI stays responsive
+    handleClose();
+    void launch(devboxId ? { devboxId, remotePath: remotePath.trim() || undefined } : null);
+  };
+
+  // Ask for the node, then poll it until it is ready (launch the session and
+  // close) or gone (say why and stay open). A request parked for approval keeps
+  // polling: the approval may well arrive while the modal is up.
+  const provisionThenLaunch = async (
+    spec: NodeRequest,
+    launch: (target: LaunchTarget) => Promise<boolean>,
+  ) => {
+    let stopped = false;
+    stopNodeFlow.current = () => { stopped = true; };
+    setNodeFlow({ phase: "requesting" });
+
+    const result = await createNode(spec);
+    if (stopped) return;
+    if (!result.ok) {
+      stopNodeFlow.current = null;
+      setNodeFlow({ phase: "error", message: result.error });
+      return;
+    }
+
+    let node = result.node;
+    setNodeFlow(nodeFlowFor(node, result.reasons));
+
+    while (!stopped) {
+      await sleep(NODE_POLL_MS);
+      if (stopped) return;
+      try {
+        const res = await fetch(`/api/compute/nodes/${encodeURIComponent(node.id)}`);
+        if (res.status === 404) {
+          stopNodeFlow.current = null;
+          setNodeFlow({ phase: "error", nodeId: node.id, name: node.name, message: `${node.name} is no longer listed; the request may have been withdrawn.` });
+          return;
+        }
+        const data = (await res.json().catch(() => ({}))) as { node?: ProvisionedNode };
+        if (data.node) node = data.node;
+      } catch {
+        continue; // transient: keep polling
+      }
+      if (stopped) return;
+
+      const status = node.provision.status;
+      if (status === "ready") {
+        setNodeFlow({ phase: "starting", nodeId: node.id, name: node.name });
+        const ok = await launch({ devboxId: node.id, remotePath: node.defaultPath });
+        if (stopped) return;
+        stopNodeFlow.current = null;
+        if (ok) {
+          setNodeFlow(null);
+          onClose();
+        } else {
+          setNodeFlow({
+            phase: "error",
+            nodeId: node.id,
+            name: node.name,
+            message: `${node.name} is ready, but the session could not be started. The node stays up; see Settings → Devboxes.`,
+          });
+        }
+        return;
+      }
+      if (status === "error" || status === "terminated") {
+        stopNodeFlow.current = null;
+        setNodeFlow({
+          phase: "error",
+          nodeId: node.id,
+          name: node.name,
+          message:
+            node.provision.error ||
+            (status === "terminated"
+              ? `${node.name} was ${node.provision.terminateReason === "user" ? "withdrawn" : "terminated"} before a session could start.`
+              : `Provisioning ${node.name} failed.`),
+        });
+        return;
+      }
+      setNodeFlow(nodeFlowFor(node));
+    }
+  };
+
+  // Stop waiting and take the request back: deny while it is parked, terminate
+  // once it is provisioning. Both are final; the button says which it will do.
+  const cancelNodeFlow = async () => {
+    const flow = nodeFlow;
+    stopNodeFlow.current?.();
+    stopNodeFlow.current = null;
+    if (!flow?.nodeId) {
+      setNodeFlow(null);
+      return;
+    }
+    setNodeFlow({ phase: "cancelling", nodeId: flow.nodeId, name: flow.name });
+    try {
+      if (flow.phase === "pending") {
+        await fetch(`/api/compute/nodes/${encodeURIComponent(flow.nodeId)}/deny`, { method: "POST" });
+      } else {
+        await fetch(`/api/compute/nodes/${encodeURIComponent(flow.nodeId)}`, { method: "DELETE" });
+      }
+    } catch {
+      // The node is still listed under Settings → Devboxes either way.
+    }
+    setNodeFlow(null);
   };
 
   const priorityColors: Record<number, string> = {
@@ -1403,38 +1591,94 @@ export function NewSessionModal({
                     )}
                   </div>}
 
-                  {/* Run on: local, or one of the configured devboxes */}
-                  {devboxes.length > 0 && (
-                    <div className="space-y-2">
-                      <label className="text-xs text-zinc-500 flex items-center gap-1.5">
-                        <Server className="w-3 h-3" />
-                        Run on
-                      </label>
-                      <select
-                        value={devboxId}
-                        onChange={(e) => {
-                          setDevboxId(e.target.value);
-                          const box = devboxes.find((item) => item.id === e.target.value);
-                          setRemotePath(box?.defaultPath || "");
-                        }}
-                        className="w-full px-3 py-2 rounded-md bg-canvas border border-border text-white text-sm focus:outline-none focus:border-zinc-500 transition-colors"
-                      >
-                        <option value="">This Mac</option>
-                        {devboxes.map((box) => (
-                          <option key={box.id} value={box.id}>{box.name}</option>
-                        ))}
-                      </select>
-                      {devboxId && (
-                        <input
-                          type="text"
-                          value={remotePath}
-                          onChange={(e) => setRemotePath(e.target.value)}
-                          placeholder="Remote directory (optional)"
-                          className="w-full px-3 py-2 rounded-md bg-canvas border border-border text-white text-sm placeholder-zinc-600 focus:outline-none focus:border-zinc-500 transition-colors font-mono"
+                  {/* Run on: local, one of the configured devboxes, or a node
+                      provisioned on the way in. Always shown: a node can be
+                      created even when no devbox exists yet. */}
+                  <div className="space-y-2">
+                    <label htmlFor="new-session-run-on" className="text-xs text-zinc-500 flex items-center gap-1.5">
+                      <Server className="w-3 h-3" />
+                      Run on
+                    </label>
+                    <select
+                      id="new-session-run-on"
+                      value={devboxId}
+                      disabled={nodeFlowBusy}
+                      onChange={(e) => {
+                        const next = e.target.value;
+                        setDevboxId(next);
+                        if (next !== NEW_NODE) {
+                          setNodeFlow(null);
+                          setNewNodeSpec(null);
+                        }
+                        const box = devboxes.find((item) => item.id === next);
+                        setRemotePath(box?.defaultPath || "");
+                      }}
+                      className="w-full px-3 py-2 rounded-md bg-canvas border border-border text-white text-sm focus:outline-none focus:border-zinc-500 transition-colors disabled:opacity-50"
+                    >
+                      <option value="">This Mac</option>
+                      {selectableDevboxes.map((box) => (
+                        <option key={box.id} value={box.id}>
+                          {box.name}
+                          {box.provision ? ` · ${box.provision.provider} ${box.provision.gpu ?? "CPU"}` : ""}
+                        </option>
+                      ))}
+                      <option value={NEW_NODE}>New node…</option>
+                    </select>
+                    {devboxId && devboxId !== NEW_NODE && (
+                      <input
+                        type="text"
+                        value={remotePath}
+                        onChange={(e) => setRemotePath(e.target.value)}
+                        placeholder="Remote directory (optional)"
+                        aria-label="Remote directory"
+                        className="w-full px-3 py-2 rounded-md bg-canvas border border-border text-white text-sm placeholder-zinc-600 focus:outline-none focus:border-zinc-500 transition-colors font-mono"
+                      />
+                    )}
+                    {devboxId === NEW_NODE && (
+                      <div className="rounded-md border border-border bg-canvas/40 p-3 space-y-2">
+                        <NewNodeForm
+                          compact
+                          onSpecChange={setNewNodeSpec}
+                          onCreated={() => {}}
+                          onCancel={() => setDevboxId("")}
                         />
-                      )}
-                    </div>
-                  )}
+                        <p className="text-[11px] text-zinc-600">
+                          The session starts in the node's home directory once the node is ready.
+                        </p>
+                        {nodeFlow && (
+                          <div
+                            role={nodeFlow.phase === "error" ? "alert" : "status"}
+                            className={`rounded-md border px-3 py-2 text-xs ${
+                              nodeFlow.phase === "error"
+                                ? "border-red-500/30 bg-red-500/5 text-red-400"
+                                : "border-border bg-canvas text-zinc-300"
+                            }`}
+                          >
+                            <div className="flex items-center justify-between gap-3">
+                              <span className="flex items-center gap-2">
+                                {nodeFlow.phase !== "error" && <Loader2 className="w-3 h-3 animate-spin flex-shrink-0" />}
+                                {nodeFlowLabel(nodeFlow)}
+                              </span>
+                              {nodeFlow.phase !== "error" && nodeFlow.phase !== "cancelling" && nodeFlow.nodeId && (
+                                <button
+                                  type="button"
+                                  onClick={() => void cancelNodeFlow()}
+                                  className="flex-shrink-0 rounded-md border border-border px-2 py-1 text-[11px] text-zinc-400 hover:text-red-300 hover:border-red-500/40 transition-colors"
+                                >
+                                  {nodeFlow.phase === "pending" ? "Withdraw request" : "Cancel and terminate"}
+                                </button>
+                              )}
+                            </div>
+                            {nodeFlow.phase === "pending" && nodeFlow.reasons && nodeFlow.reasons.length > 0 && (
+                              <ul className="mt-1 list-disc pl-4 text-[11px] text-zinc-500">
+                                {nodeFlow.reasons.map((reason) => <li key={reason}>{reason}</li>)}
+                              </ul>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
 
                   {/* Working directory — local only; a devbox session runs from
                       the remote directory above, and this just anchors the ssh
@@ -1700,10 +1944,19 @@ export function NewSessionModal({
                   </button>
                   <button
                     onClick={handleCreate}
-                    disabled={!selectedAgent || (!selectedAgent?.command && !commandArgs) || (activeTab === "linear" && !selectedTicket) || (activeTab === "github" && !selectedGithubIssue)}
-                    className="px-4 py-1.5 rounded-md text-sm font-medium text-canvas bg-white hover:bg-zinc-100 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                    disabled={
+                      !selectedAgent ||
+                      (!selectedAgent?.command && !commandArgs) ||
+                      (activeTab === "linear" && !selectedTicket) ||
+                      (activeTab === "github" && !selectedGithubIssue) ||
+                      (devboxId === NEW_NODE && (!newNodeSpec || nodeFlowBusy))
+                    }
+                    className="px-4 py-1.5 rounded-md text-sm font-medium text-canvas bg-white hover:bg-zinc-100 disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center gap-1.5"
                   >
-                    {isReplacing
+                    {nodeFlowBusy && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                    {nodeFlowBusy
+                      ? "Provisioning…"
+                      : isReplacing
                       ? "Start Session"
                       : count > 1
                       ? `Create ${count} Agents`

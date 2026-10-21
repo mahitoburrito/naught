@@ -1,19 +1,38 @@
 import { useCallback, useEffect, useState } from "react";
-import { Check, FolderOpen, Loader2, Plus, Server, Trash2, X } from "lucide-react";
+import { Check, Cpu, FolderOpen, Loader2, Plus, Server, Trash2, X } from "lucide-react";
 import { SectionHeader } from "./primitives";
 import { canUseNativeDirectoryPicker, pickDirectoryNative } from "../../utils/nativeDirectoryPicker";
+import { NewNodeForm } from "../compute/NewNodeForm";
+import { agentStatusStyle } from "../../theme/agentStatus";
+import type { AgentStatus } from "../../stores/useStore";
+import { estimatedCost, formatUsd, formatUptime } from "../../types/compute";
+import type { Devbox, ProvisionRecord, ProvisionStatus } from "../../types/compute";
 
-export interface Devbox {
-  id: string;
-  name: string;
-  source: "manual" | "ssh-config";
-  inSshConfig: boolean;
-  host?: string;
-  user?: string;
-  port?: number;
-  identityFile?: string;
-  defaultPath?: string;
-}
+export type { Devbox };
+
+/** Statuses the list keeps polling for and that Terminate applies to. */
+const LIVE_STATUSES: ProvisionStatus[] = ["pending", "provisioning", "ready", "terminating"];
+
+/** Provision statuses borrow the agent-status palette so one colour means one thing app-wide. */
+const PROVISION_STATUS_AGENT: Record<ProvisionStatus, AgentStatus> = {
+  pending: "waiting_input",
+  provisioning: "running",
+  ready: "idle",
+  terminating: "running",
+  terminated: "disconnected",
+  error: "error",
+};
+
+const PROVISION_STATUS_LABEL: Record<ProvisionStatus, string> = {
+  pending: "Awaiting approval",
+  provisioning: "Provisioning",
+  ready: "Ready",
+  terminating: "Terminating",
+  terminated: "Terminated",
+  error: "Error",
+};
+
+const POLL_MS = 5_000;
 
 interface DiscoveredHost {
   name: string;
@@ -39,8 +58,10 @@ export function DevboxesTab() {
   const [sshConfigPath, setSshConfigPath] = useState("");
   const [loading, setLoading] = useState(true);
   const [adding, setAdding] = useState(false);
+  const [provisioning, setProvisioning] = useState(false);
   const [tests, setTests] = useState<Record<string, TestState>>({});
   const [notice, setNotice] = useState<string | null>(null);
+  const [now, setNow] = useState(() => Date.now());
 
   const refresh = useCallback(async () => {
     try {
@@ -56,7 +77,16 @@ export function DevboxesTab() {
     }
   }, []);
 
-  useEffect(() => { refresh(); }, [refresh]);
+  // Provisioned nodes change state on their own (provider, bootstrap, the
+  // lifetime cap), so the list re-reads itself while the tab is open.
+  useEffect(() => {
+    refresh();
+    const timer = window.setInterval(() => {
+      setNow(Date.now());
+      void refresh();
+    }, POLL_MS);
+    return () => window.clearInterval(timer);
+  }, [refresh]);
 
   const runTest = async (id: string) => {
     setTests((current) => ({ ...current, [id]: { status: "running" } }));
@@ -102,18 +132,50 @@ export function DevboxesTab() {
           </div>
         ) : (
           <div className="divide-y divide-border">
-            {devboxes.map((devbox) => (
-              <DevboxRow
-                key={devbox.id}
-                devbox={devbox}
-                test={tests[devbox.id]}
-                onTest={() => runTest(devbox.id)}
-                onRemove={() => remove(devbox.id)}
-              />
-            ))}
+            {devboxes.map((devbox) =>
+              devbox.source === "provisioned" && devbox.provision ? (
+                <ProvisionedRow
+                  key={devbox.id}
+                  devbox={devbox}
+                  provision={devbox.provision}
+                  now={now}
+                  test={tests[devbox.id]}
+                  onTest={() => runTest(devbox.id)}
+                  onRemove={() => remove(devbox.id)}
+                />
+              ) : (
+                <DevboxRow
+                  key={devbox.id}
+                  devbox={devbox}
+                  test={tests[devbox.id]}
+                  onTest={() => runTest(devbox.id)}
+                  onRemove={() => remove(devbox.id)}
+                />
+              ),
+            )}
           </div>
         )}
       </div>
+
+      {provisioning ? (
+        <NewNodeForm
+          onCancel={() => setProvisioning(false)}
+          onCreated={() => {
+            setProvisioning(false);
+            setNotice(null);
+            refresh();
+          }}
+        />
+      ) : (
+        <button
+          type="button"
+          onClick={() => { setNotice(null); setAdding(false); setProvisioning(true); }}
+          className="mt-2 flex items-center gap-1.5 rounded-md border border-border bg-canvas px-3 py-2 text-sm text-zinc-300 transition-colors hover:bg-surface-active hover:text-white"
+        >
+          <Cpu className="h-3.5 w-3.5" />
+          Provision a node
+        </button>
+      )}
 
       {adding ? (
         <AddDevboxForm
@@ -127,7 +189,7 @@ export function DevboxesTab() {
       ) : (
         <button
           type="button"
-          onClick={() => { setNotice(null); setAdding(true); }}
+          onClick={() => { setNotice(null); setProvisioning(false); setAdding(true); }}
           className="mt-2 flex items-center gap-1.5 rounded-md border border-border bg-canvas px-3 py-2 text-sm text-zinc-300 transition-colors hover:bg-surface-active hover:text-white"
         >
           <Plus className="h-3.5 w-3.5" />
@@ -237,6 +299,155 @@ function DevboxRow({
       >
         <Trash2 className="h-3.5 w-3.5" />
       </button>
+    </div>
+  );
+}
+
+function ProvisionedRow({
+  devbox,
+  provision,
+  now,
+  test,
+  onTest,
+  onRemove,
+}: {
+  devbox: Devbox;
+  provision: ProvisionRecord;
+  now: number;
+  test?: TestState;
+  onTest: () => void;
+  onRemove: () => Promise<void>;
+}) {
+  const [confirming, setConfirming] = useState(false);
+  const [acting, setActing] = useState(false);
+  const live = LIVE_STATUSES.includes(provision.status);
+  const style = agentStatusStyle(PROVISION_STATUS_AGENT[provision.status]);
+  const spec = [
+    provision.gpu ? `${provision.gpuCount > 1 ? `${provision.gpuCount}× ` : ""}${provision.gpu}` : "CPU",
+    `${provision.cpu} vCPU`,
+    `${provision.memoryGb} GB`,
+  ].join(" · ");
+  const sshTarget = devbox.host
+    ? `${devbox.user ? `${devbox.user}@` : ""}${devbox.host}${devbox.port ? `:${devbox.port}` : ""}`
+    : null;
+
+  // Terminating is final for both providers (neither has a stop API), so the
+  // first click only arms the button and the second one acts.
+  useEffect(() => {
+    if (!confirming) return;
+    const timer = window.setTimeout(() => setConfirming(false), 6_000);
+    return () => window.clearTimeout(timer);
+  }, [confirming]);
+
+  const act = async () => {
+    setActing(true);
+    try {
+      await onRemove();
+    } finally {
+      setActing(false);
+      setConfirming(false);
+    }
+  };
+
+  return (
+    <div className="flex items-start gap-3 px-4 py-3">
+      <div className="min-w-0 flex-1">
+        <div className="flex items-center gap-2">
+          <span className="truncate text-sm text-zinc-200">{devbox.name}</span>
+          <span className="flex-shrink-0 rounded border border-border px-1 text-[9px] uppercase tracking-wide text-zinc-500">
+            {provision.provider}
+          </span>
+          <span
+            className="flex-shrink-0 rounded px-1.5 py-px text-[10px] font-medium"
+            style={{ color: style.color, backgroundColor: style.bg, border: `1px solid ${style.border}` }}
+          >
+            {PROVISION_STATUS_LABEL[provision.status]}
+          </span>
+        </div>
+        <div className="truncate text-[11px] text-zinc-500">{spec}</div>
+        {provision.startedAt && (
+          <div className="text-[11px] text-zinc-500">
+            {provision.status === "terminated" ? "Ran " : "Up "}
+            {formatUptime((provision.terminatedAt ?? now) - provision.startedAt)}
+            <span className="text-zinc-600"> · {formatUsd(estimatedCost(provision, now))} est.</span>
+            {provision.status !== "terminated" && (
+              <span className="text-zinc-600"> at {formatUsd(provision.hourlyUsd)}/hr</span>
+            )}
+          </div>
+        )}
+        {!provision.startedAt && provision.hourlyUsd > 0 && provision.status !== "terminated" && (
+          <div className="text-[11px] text-zinc-600">{formatUsd(provision.hourlyUsd)}/hr est. once it starts</div>
+        )}
+        {provision.status === "pending" && provision.reasons && provision.reasons.length > 0 && (
+          <div className="mt-0.5 text-[11px] text-amber-400">{provision.reasons.join(" · ")}</div>
+        )}
+        {provision.error && <div className="mt-0.5 text-[11px] text-red-400">{provision.error}</div>}
+        {sshTarget && <div className="truncate font-mono text-[11px] text-zinc-600">{sshTarget}</div>}
+        {devbox.defaultPath && (
+          <div className="truncate font-mono text-[11px] text-zinc-600">{devbox.defaultPath}</div>
+        )}
+        {test && test.status !== "idle" && (
+          <div
+            className={`mt-1 text-[11px] ${
+              test.status === "ok" ? "text-emerald-400" : test.status === "fail" ? "text-red-400" : "text-zinc-500"
+            }`}
+          >
+            {test.status === "running" ? "Testing…" : test.message}
+            {test.detail && <span className="text-zinc-600"> — {test.detail}</span>}
+          </div>
+        )}
+      </div>
+      <button
+        type="button"
+        onClick={onTest}
+        disabled={test?.status === "running" || !sshTarget}
+        className="flex-shrink-0 rounded-md border border-border px-2 py-1 text-[11px] text-zinc-400 transition-colors hover:text-white hover:bg-surface-active disabled:opacity-50"
+      >
+        {test?.status === "running" ? <Loader2 className="h-3 w-3 animate-spin" /> : "Test"}
+      </button>
+      {live ? (
+        confirming ? (
+          <>
+            <button
+              type="button"
+              onClick={act}
+              disabled={acting}
+              aria-label={provision.status === "pending" ? `Confirm withdrawing ${devbox.name}` : `Confirm terminating ${devbox.name}`}
+              className="flex-shrink-0 rounded-md border border-red-500/40 bg-red-500/10 px-2 py-1 text-[11px] text-red-300 transition-colors hover:bg-red-500/20 hover:text-red-200 disabled:opacity-50"
+            >
+              {acting ? <Loader2 className="h-3 w-3 animate-spin" /> : provision.status === "pending" ? "Withdraw?" : "Terminate?"}
+            </button>
+            <button
+              type="button"
+              onClick={() => setConfirming(false)}
+              disabled={acting}
+              className="flex-shrink-0 rounded-md px-2 py-1 text-[11px] text-zinc-500 transition-colors hover:text-white"
+            >
+              Cancel
+            </button>
+          </>
+        ) : (
+          <button
+            type="button"
+            onClick={() => setConfirming(true)}
+            disabled={provision.status === "terminating"}
+            aria-label={`Terminate ${devbox.name}`}
+            className="flex-shrink-0 rounded-md border border-border px-2 py-1 text-[11px] text-zinc-400 transition-colors hover:border-red-500/40 hover:text-red-300 disabled:opacity-50"
+          >
+            {provision.status === "pending" ? "Withdraw" : "Terminate"}
+          </button>
+        )
+      ) : (
+        <button
+          type="button"
+          onClick={act}
+          disabled={acting}
+          aria-label={`Remove ${devbox.name}`}
+          className="flex-shrink-0 rounded-md border border-border px-2 py-1 text-[11px] text-zinc-400 transition-colors hover:text-white hover:bg-surface-active disabled:opacity-50"
+        >
+          {acting ? <Loader2 className="h-3 w-3 animate-spin" /> : "Remove"}
+        </button>
+      )}
     </div>
   );
 }

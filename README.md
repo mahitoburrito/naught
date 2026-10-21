@@ -128,6 +128,32 @@ and accumulate in the background for days.
 If you want something to outlive its session (a long-running dev server, say),
 start it outside OpenUI. Quitting the app tears down every session the same way.
 
+## Compute nodes
+
+Naught can provision a node or GPU for a session from Modal or Thunder Compute, with the provider key stored once as a secret.
+
+- **Keys** live in `.openui-desktop/.env` next to the other integrations (`MODAL_TOKEN_ID`/`MODAL_TOKEN_SECRET`, `TNR_API_TOKEN`). Modal is picked up from `~/.modal.toml` and Thunder from `~/.thunder/token` automatically; Settings → Compute shows which source is in effect and lets you override it.
+- **Provisioned nodes are devboxes.** A node appears in Settings → Devboxes with its provider, GPU, uptime and estimated cost, and in the *Run on* selector of the new-session modal (which also has *New node…* to provision inline). Modal nodes are sandboxes running sshd from an image that already carries the Claude Code and Codex CLIs; Thunder nodes are VMs bootstrapped over ssh. Naught connects with its own ed25519 key under `.openui-desktop/keys/`.
+- **Policy.** Settings → Compute → Policy caps concurrent nodes (2), allowed GPU classes (any), lifetime (8 h, then auto-terminate) and $/hr per node (5). Requests inside the caps start immediately; anything above waits in an approval sheet, and the header shows a live-nodes pill with the running $/hr whenever something is up.
+- **Email.** With a Resend key and a recipient set, Naught mails when billing starts, every 4 h while a node is live, after 60 min without any session activity, and when the node ends. Each mail says how to stop the node.
+- **Agents provision too.** Every session has `naught` on its PATH:
+
+  ```
+  naught node offers --provider modal
+  naught node create --provider modal --gpu H100          # blocks until ready, prints the ssh target
+  naught node list | status <id> | wait <id> | terminate <id>
+  naught session move --to <node-id> | --to new:modal:H100 | --home
+  ```
+
+  A request above policy exits 2 with the reasons; `naught node wait <id>` blocks until you approve it in the IDE.
+- **Node credentials.** Nodes cannot read this Mac's keychain, so Settings → Compute → Node credentials holds the Claude token (`claude setup-token`) and OpenAI key that get written to `~/.naught/env` on each node.
+
+## Move a session to a node
+
+Right-click a local session → **Move to node…** (or run `naught session move` from inside it). Naught waits for the agent to go idle, stops it, copies the working directory to the **same absolute path** on the node (tracked and untracked files; git-ignored files are opt-in; a linked worktree brings its mother `.git`), copies the Claude Code transcript or Codex rollout under the node's home, and relaunches the same card on the node with `claude --resume` / `codex resume`. The local working tree is never modified by a move out.
+
+**Bring back** reverses it. If local files changed in the meantime you choose between overwriting them with the node's copy or landing in a fresh git worktree. The node is terminated afterwards unless another session still uses it. A move is a persisted step machine: a failure leaves the card with the error, *Retry* resumes at the failed step, and a restart of Naught never loses a half-moved session.
+
 ## Development
 
 ```bash

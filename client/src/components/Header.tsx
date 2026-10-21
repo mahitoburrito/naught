@@ -1,6 +1,7 @@
 import { Folder, Grid3X3, Maximize2, MousePointer2, Network, Search, Settings } from "lucide-react";
 import { useStore } from "../stores/useStore";
 import { useCoordinatorAgentStore } from "../stores/useCoordinatorAgentStore";
+import { LiveNodesIndicator } from "./compute/LiveNodesIndicator";
 
 export function Header() {
   const setCoordinatorOpen = useCoordinatorAgentStore((state) => state.setPanelOpen);
@@ -47,6 +48,7 @@ export function Header() {
           <Folder className="h-3.5 w-3.5 flex-shrink-0" />
           <span className="max-w-[360px] truncate font-mono">{launchCwd || "~"}</span>
         </div>
+        <LiveNodesIndicator />
       </div>
 
       <div className="titlebar-no-drag flex items-center gap-1.5">

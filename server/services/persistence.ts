@@ -13,7 +13,7 @@ import {
   writeSync,
 } from "fs";
 import { basename, dirname, isAbsolute, join, resolve } from "path";
-import type { PersistedState, Session, TerminalCommandBlock } from "../types";
+import type { MoveState, PersistedState, Session, TerminalCommandBlock } from "../types";
 import { classifyTerminalFailureKind } from "./terminalExit";
 
 // Use local .openui-desktop folder where user ran from
@@ -392,6 +392,85 @@ function validateShellLaunch(value: unknown): { shell: string; args: string[] } 
   return { shell, args };
 }
 
+const MOVE_STEPS = new Set([
+  "waiting-idle", "prepare", "quiesce", "sync-files", "sync-agent", "relaunch", "verify", "done", "error",
+]);
+
+export function validateMoveState(value: unknown): MoveState | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const raw = value as any;
+  const direction = raw.direction === "out" || raw.direction === "home" ? raw.direction : undefined;
+  const state = typeof raw.state === "string" && MOVE_STEPS.has(raw.state) ? raw.state : undefined;
+  const nodeId = boundedIdentifier(raw.nodeId, 256);
+  const startedAt = finiteNumber(raw.startedAt);
+  if (!direction || !state || !nodeId || startedAt === undefined) return undefined;
+  const harnessRaw = raw.harness && typeof raw.harness === "object" ? raw.harness : {};
+  let harness: MoveState["harness"];
+  if (harnessRaw.kind === "claude" && boundedIdentifier(harnessRaw.sessionId, 256)) {
+    harness = {
+      kind: "claude",
+      sessionId: harnessRaw.sessionId,
+      transcriptPath: boundedString(harnessRaw.transcriptPath, MAX_CWD_CHARS),
+    };
+  } else if (
+    harnessRaw.kind === "codex" &&
+    boundedIdentifier(harnessRaw.sessionId, 256) &&
+    boundedString(harnessRaw.rolloutPath, MAX_CWD_CHARS)
+  ) {
+    harness = { kind: "codex", sessionId: harnessRaw.sessionId, rolloutPath: harnessRaw.rolloutPath };
+  } else {
+    harness = { kind: "shell" };
+  }
+  const roots = Array.isArray(raw.roots)
+    ? raw.roots.slice(0, 16).flatMap((item: unknown) => {
+        const parsed = boundedString(item, MAX_CWD_CHARS);
+        return parsed === undefined ? [] : [parsed];
+      })
+    : [];
+  const manifest = raw.manifest && typeof raw.manifest === "object" &&
+    typeof raw.manifest.hash === "string" && finiteNumber(raw.manifest.files) !== undefined &&
+    finiteNumber(raw.manifest.bytes) !== undefined
+    ? {
+        hash: raw.manifest.hash.slice(0, 128),
+        files: raw.manifest.files,
+        bytes: raw.manifest.bytes,
+        roots: Array.isArray(raw.manifest.roots)
+          ? raw.manifest.roots.slice(0, 16).flatMap((item: unknown) => {
+              const parsed = boundedString(item, MAX_CWD_CHARS);
+              return parsed === undefined ? [] : [parsed];
+            })
+          : [],
+      }
+    : undefined;
+  const history = Array.isArray(raw.history)
+    ? raw.history.slice(-50).flatMap((entry: any) => {
+        const entryDirection = entry?.direction === "out" || entry?.direction === "home" ? entry.direction : undefined;
+        const entryNode = boundedIdentifier(entry?.nodeId, 256);
+        const at = finiteNumber(entry?.at);
+        const manifestHash = boundedString(entry?.manifestHash, 128);
+        return entryDirection && entryNode && at !== undefined && manifestHash !== undefined
+          ? [{ direction: entryDirection, nodeId: entryNode, at, manifestHash }]
+          : [];
+      })
+    : [];
+  return {
+    direction,
+    state,
+    nodeId,
+    startedAt,
+    updatedAt: finiteNumber(raw.updatedAt) ?? startedAt,
+    harness,
+    roots,
+    manifest,
+    includeIgnored: raw.includeIgnored === true,
+    failedStep: typeof raw.failedStep === "string" && MOVE_STEPS.has(raw.failedStep) ? raw.failedStep : undefined,
+    error: boundedString(raw.error, 4_000),
+    conflict: raw.conflict === "overwrite" || raw.conflict === "worktree" ? raw.conflict : undefined,
+    terminateNode: raw.terminateNode === true || undefined,
+    history,
+  };
+}
+
 function validateCheckpoint(value: unknown): PersistedState["nodes"][number]["launchCheckpoint"] {
   if (!value || typeof value !== "object") return undefined;
   const raw = value as any;
@@ -458,6 +537,9 @@ function validatePersistedNode(value: unknown): PersistedState["nodes"][number] 
     command,
     cwd,
     originalCwd: boundedString(node.originalCwd, MAX_CWD_CHARS),
+    devboxId: boundedIdentifier(node.devboxId, 256),
+    remotePath: boundedString(node.remotePath, MAX_CWD_CHARS),
+    move: validateMoveState(node.move),
     createdAt,
     customName: boundedString(node.customName, 1_024),
     generatedTitle: boundedString(node.generatedTitle, 1_024),
@@ -601,6 +683,7 @@ export function saveState(sessions: Map<string, Session>) {
       originalCwd: session.originalCwd,
       devboxId: session.devboxId,
       remotePath: session.remotePath,
+      move: session.move,
       createdAt: session.createdAt,
       customName: session.customName,
       generatedTitle: session.generatedTitle,

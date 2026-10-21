@@ -116,12 +116,15 @@ interface RemoteSession {
   hostId?: string;
   platform?: string;
   fallbackReason?: string;
+  /** Port on the remote host that forwards back to this server (status hooks). */
+  hookPort?: number;
   pathCache: Map<string, { expiresAt: number; commands: TerminalPathCommand[] }>;
 }
 
 type RemoteControlAction =
   | { action: "connecting"; target: string; controlPath: string }
   | { action: "ready"; target: string; controlPath: string; assetVersion: string }
+  | { action: "tunnel"; controlPath: string; port: number }
   | { action: "fallback"; reason: string }
   | { action: "closed"; reason: string };
 
@@ -180,6 +183,12 @@ function parseControlPayload(payload: string): RemoteControlEnvelope | null {
     return value as RemoteControlEnvelope;
   }
   if ((value.action === "fallback" || value.action === "closed") && safeReason(value.reason)) {
+    return value as RemoteControlEnvelope;
+  }
+  if (
+    value.action === "tunnel" && typeof value.controlPath === "string" &&
+    Number.isInteger(value.port) && value.port > 0 && value.port <= 65535
+  ) {
     return value as RemoteControlEnvelope;
   }
   return null;
@@ -395,10 +404,16 @@ class TerminalRemoteManager {
     const envelope = parseControlPayload(payload);
     if (!envelope || !safeEqual(envelope.token, session.runtime.token)) return false;
 
+    if (envelope.action === "tunnel") {
+      if (!this.validControlPath(session, envelope.controlPath)) return false;
+      session.hookPort = envelope.port;
+      return true;
+    }
     if (envelope.action === "connecting") {
       if (!this.validControlPath(session, envelope.controlPath)) return false;
       this.stopConnection(session, new TerminalRemoteUnavailableError("Remote SSH connection was replaced"));
       session.active = undefined;
+      session.hookPort = undefined;
       session.state = "connecting";
       session.explicitClose = false;
       session.fallbackReason = undefined;
@@ -451,6 +466,20 @@ class TerminalRemoteManager {
 
   isConnected(sessionId: string): boolean {
     return this.sessions.get(sessionId)?.state === "connected";
+  }
+
+  hasRuntime(sessionId: string): boolean {
+    return this.sessions.has(sessionId);
+  }
+
+  hookPort(sessionId: string): number | undefined {
+    return this.sessions.get(sessionId)?.hookPort;
+  }
+
+  hookPorts(): Set<number> {
+    const ports = new Set<number>();
+    for (const session of this.sessions.values()) if (session.hookPort) ports.add(session.hookPort);
+    return ports;
   }
 
   async run(sessionId: string, request: TerminalRemoteRunRequest): Promise<TerminalRemoteRunResult> {
