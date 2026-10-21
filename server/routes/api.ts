@@ -1,3 +1,4 @@
+import { isResumableSessionId } from "../services/agentResume";
 import { Hono } from "hono";
 import * as pty from "node-pty";
 import { readdirSync, statSync, writeFileSync, mkdirSync, existsSync, readFileSync, renameSync, rmSync } from "fs";
@@ -19,6 +20,7 @@ import {
   DEFAULT_PTY_ROWS,
   scheduleSessionTitleGeneration,
   getSessionShellLaunch,
+  restartSession,
   getSessionPtyEnvironment,
   attachSessionPty,
   installShellIntegration,
@@ -1969,6 +1971,7 @@ apiRoutes.get("/sessions", (c) => {
     agentProfileVersion: session.agentProfileVersion,
     agentPermissionPolicy: session.agentPermissionPolicy,
     agentModel: session.agentModel,
+    resumable: !session.pty && session.agentId === "claude" && isResumableSessionId(session.resumeSessionId),
     terminalCols: session.terminalCols,
     terminalRows: session.terminalRows,
   }));
@@ -3094,71 +3097,10 @@ apiRoutes.post("/sessions", async (c) => {
 
 apiRoutes.post("/sessions/:sessionId/restart", async (c) => {
   const sessionId = c.req.param("sessionId");
-  const session = sessions.get(sessionId);
-  if (!session) return c.json({ error: "Session not found" }, 404);
-  if (session.pty) return c.json({ error: "Session already running" }, 400);
-
-  const { shell, args: shellArgs } = getSessionShellLaunch(session);
-  const cwd = existsSync(session.cwd) ? session.cwd : homedir();
-
-  let ptyProcess: pty.IPty;
-  try {
-    ptyProcess = pty.spawn(shell, shellArgs, {
-      name: "xterm-256color",
-      cwd,
-      env: getSessionPtyEnvironment(sessionId, session),
-      cols: session.terminalCols || DEFAULT_PTY_COLS,
-      rows: session.terminalRows || DEFAULT_PTY_ROWS,
-    });
-  } catch (e: any) {
-    logError(`[session] Failed to restart PTY (shell=${shell}, cwd=${cwd}): ${e.message}`);
-    return c.json({ error: `Failed to spawn terminal: ${e.message}` }, 500);
-  }
-
-  session.pty = ptyProcess;
-  session.isRestored = false;
-  // Existing clients will receive this PTY epoch live. If none are attached,
-  // let the first future renderer reconstruct it from the bounded raw buffer.
-  session.terminalClientConnected = session.clients.size > 0;
-  session.lastOutputTime = Date.now();
-  session.cwd = cwd;
-  session.shellLaunch = { shell, args: [...shellArgs] };
-  resetTerminalLifecycle(sessionId, cwd);
-  session.agentFallbackIndex = 0;
-  session.agentAttemptCommand = undefined;
-  session.agentAttemptBlockId = undefined;
-  session.agentAttemptStartedAt = undefined;
-
-  startAgentStatusTicker(sessionId, session, sessions);
-
-  // Reset plugin status tracking for a fresh process. Everything createSession
-  // initialises has to be reset here too, or the new PTY inherits the old
-  // one's inference state.
-  session.pluginReportedStatus = false;
-  session.lastPluginStatusTime = undefined;
-  session.lastHookEvent = undefined;
-  session.claudeSessionId = undefined;
-  session.currentTool = undefined;
-  session.preToolTime = undefined;
-  session.recentOutputSize = 0;
-  applyAgentStatus(session, "running", { source: "authoritative", immediate: true });
-  session.statusChangedAt = Date.now();
-
-  attachSessionPty(sessionId, session, ptyProcess, "Restarted PTY");
-
-  const finalCommand = injectPluginDir(
-    resolveAgentLaunchCommand(session.command, session.agentId),
-    session.agentId,
-  );
-  setTimeout(() => {
-    if (session.pty === ptyProcess) installShellIntegration(sessionId, session, ptyProcess, shell);
-  }, 150);
-  setTimeout(() => {
-    if (finalCommand) startTrackedCommand(sessionId, session, ptyProcess, finalCommand);
-  }, 450);
-
-  log(`[session] Restarted ${sessionId}`);
-  return c.json({ success: true });
+  const body = await c.req.json().catch(() => ({}));
+  const result = restartSession(sessionId, { resume: body?.resume === true });
+  if (!result.ok) return c.json({ error: result.error }, result.status as 400 | 404 | 500);
+  return c.json({ success: true, resumed: result.resumed === true });
 });
 
 apiRoutes.patch("/sessions/:sessionId", async (c) => {
@@ -3305,6 +3247,10 @@ apiRoutes.post("/status-update", async (c) => {
     // fallback below then routes hooks to whichever one the map yields first.
     if (claudeSessionId && (!session.claudeSessionId || hookEvent === "SessionStart")) {
       session.claudeSessionId = claudeSessionId;
+    }
+    // Remembered across SessionEnd and app restarts so the node can resume it.
+    if (claudeSessionId && isResumableSessionId(claudeSessionId)) {
+      session.resumeSessionId = claudeSessionId;
     }
     if (hookEvent === "SessionEnd") {
       session.claudeSessionId = undefined;
@@ -3600,6 +3546,7 @@ apiRoutes.get("/linear/config", (c) => {
     defaultBaseBranch: config.defaultBaseBranch || "main",
     createWorktree: config.createWorktree ?? false,
     autoCareful: config.autoCareful ?? false,
+    resumeSessionsOnLaunch: config.resumeSessionsOnLaunch ?? false,
     ticketPromptTemplate: config.ticketPromptTemplate || DEFAULT_TICKET_PROMPT,
     initialPrompt: config.initialPrompt || "",
     defaultStartingDirectory: config.defaultStartingDirectory || "",
@@ -3617,6 +3564,7 @@ apiRoutes.post("/linear/config", async (c) => {
   if (body.defaultBaseBranch !== undefined) config.defaultBaseBranch = body.defaultBaseBranch;
   if (body.createWorktree !== undefined) config.createWorktree = body.createWorktree;
   if (body.autoCareful !== undefined) config.autoCareful = body.autoCareful;
+  if (typeof body.resumeSessionsOnLaunch === "boolean") config.resumeSessionsOnLaunch = body.resumeSessionsOnLaunch;
   if (body.ticketPromptTemplate !== undefined) config.ticketPromptTemplate = body.ticketPromptTemplate;
   if (body.initialPrompt !== undefined) config.initialPrompt = body.initialPrompt;
   if (body.defaultStartingDirectory !== undefined) config.defaultStartingDirectory = body.defaultStartingDirectory;

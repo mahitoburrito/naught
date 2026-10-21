@@ -82,6 +82,7 @@ export function loadConfig(): LinearConfig {
       config.createWorktree = fileConfig.createWorktree;
       config.ticketPromptTemplate = fileConfig.ticketPromptTemplate;
       config.autoCareful = fileConfig.autoCareful;
+      config.resumeSessionsOnLaunch = fileConfig.resumeSessionsOnLaunch === true;
       config.initialPrompt = fileConfig.initialPrompt;
       config.defaultStartingDirectory = fileConfig.defaultStartingDirectory;
       config.rememberLastDirectory = fileConfig.rememberLastDirectory;
@@ -111,6 +112,7 @@ export function saveConfig(config: LinearConfig): void {
       createWorktree: config.createWorktree,
       ticketPromptTemplate: config.ticketPromptTemplate,
       autoCareful: config.autoCareful,
+      resumeSessionsOnLaunch: config.resumeSessionsOnLaunch,
       initialPrompt: config.initialPrompt,
       defaultStartingDirectory: config.defaultStartingDirectory,
       rememberLastDirectory: config.rememberLastDirectory,

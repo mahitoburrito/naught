@@ -451,6 +451,8 @@ export interface LinearConfig {
   ticketPromptTemplate?: string;
   initialPrompt?: string;
   autoCareful?: boolean;
+  /** Relaunch saved sessions (resuming Claude conversations) when the app opens. */
+  resumeSessionsOnLaunch?: boolean;
   /* Session launch defaults (Settings -> Sessions) */
   defaultStartingDirectory?: string;
   rememberLastDirectory?: boolean;

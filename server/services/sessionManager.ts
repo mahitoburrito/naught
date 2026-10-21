@@ -1,3 +1,4 @@
+import { planRelaunch } from "./agentResume";
 import * as pty from "node-pty";
 import {
   accessSync,
@@ -2206,6 +2207,100 @@ export function deleteSession(sessionId: string) {
   return true;
 }
 
+export interface RestartSessionResult {
+  ok: boolean;
+  status: number;
+  error?: string;
+  /** True when a Claude conversation was resumed rather than started fresh. */
+  resumed?: boolean;
+}
+
+/**
+ * Relaunch a disconnected session in place: same node, directory and launch
+ * command. With resume, a Claude node whose conversation is still on disk runs
+ * `claude --resume <id>`; everything else starts fresh.
+ */
+export function restartSession(sessionId: string, options: { resume?: boolean } = {}): RestartSessionResult {
+  const session = sessions.get(sessionId);
+  if (!session) return { ok: false, status: 404, error: "Session not found" };
+  if (session.pty) return { ok: false, status: 400, error: "Session already running" };
+  const plan = planRelaunch(session, { resume: options.resume === true });
+
+  const { shell, args: shellArgs } = getSessionShellLaunch(session);
+  const cwd = existsSync(session.cwd) ? session.cwd : homedir();
+
+  let ptyProcess: pty.IPty;
+  try {
+    ptyProcess = pty.spawn(shell, shellArgs, {
+      name: "xterm-256color",
+      cwd,
+      env: getSessionPtyEnvironment(sessionId, session),
+      cols: session.terminalCols || DEFAULT_PTY_COLS,
+      rows: session.terminalRows || DEFAULT_PTY_ROWS,
+    });
+  } catch (e: any) {
+    logError(`[session] Failed to restart PTY (shell=${shell}, cwd=${cwd}): ${e.message}`);
+    return { ok: false, status: 500, error: `Failed to spawn terminal: ${e.message}` };
+  }
+
+  session.pty = ptyProcess;
+  session.isRestored = false;
+  // Existing clients will receive this PTY epoch live. If none are attached,
+  // let the first future renderer reconstruct it from the bounded raw buffer.
+  session.terminalClientConnected = session.clients.size > 0;
+  session.lastOutputTime = Date.now();
+  session.cwd = cwd;
+  session.shellLaunch = { shell, args: [...shellArgs] };
+  resetTerminalLifecycle(sessionId, cwd);
+  session.agentFallbackIndex = 0;
+  session.agentAttemptCommand = undefined;
+  session.agentAttemptBlockId = undefined;
+  session.agentAttemptStartedAt = undefined;
+
+  startAgentStatusTicker(sessionId, session, sessions);
+
+  // Reset plugin status tracking for a fresh process. Everything createSession
+  // initialises has to be reset here too, or the new PTY inherits the old
+  // one's inference state.
+  session.pluginReportedStatus = false;
+  session.lastPluginStatusTime = undefined;
+  session.lastHookEvent = undefined;
+  session.claudeSessionId = undefined;
+  session.currentTool = undefined;
+  session.preToolTime = undefined;
+  session.recentOutputSize = 0;
+  applyAgentStatus(session, "running", { source: "authoritative", immediate: true });
+  session.statusChangedAt = Date.now();
+
+  attachSessionPty(sessionId, session, ptyProcess, "Restarted PTY");
+
+  const finalCommand = injectPluginDir(
+    resolveAgentLaunchCommand(plan.command, session.agentId),
+    session.agentId,
+  );
+  setTimeout(() => {
+    if (session.pty === ptyProcess) installShellIntegration(sessionId, session, ptyProcess, shell);
+  }, 150);
+  setTimeout(() => {
+    if (finalCommand) startTrackedCommand(sessionId, session, ptyProcess, finalCommand);
+  }, 450);
+
+  log(`[session] ${plan.resumed ? "Resumed" : "Restarted"} ${sessionId}`);
+  return { ok: true, status: 200, resumed: plan.resumed };
+}
+
+/** Bring every saved session back after launch, a few at a time so agents don't all load at once. */
+export function resumeRestoredSessions(delayMs = 400): void {
+  const pending = [...sessions.entries()].filter(([, session]) => session.isRestored && !session.pty).map(([id]) => id);
+  pending.forEach((sessionId, index) => {
+    setTimeout(() => {
+      const result = restartSession(sessionId, { resume: true });
+      if (!result.ok) logError(`[restore] Could not resume ${sessionId}: ${result.error}`);
+    }, index * delayMs);
+  });
+  if (pending.length > 0) log(`[restore] Resuming ${pending.length} saved session(s)`);
+}
+
 export async function restoreSessions() {
   const state = loadState();
 
@@ -2263,6 +2358,7 @@ export async function restoreSessions() {
       agentAllowedTools: node.agentAllowedTools,
       agentRuntimeManifestPath: node.agentRuntimeManifestPath,
       agentModel: node.agentModel,
+      resumeSessionId: node.resumeSessionId,
       agentPermissionEvents: node.agentPermissionEvents,
     };
 
