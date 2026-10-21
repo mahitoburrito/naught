@@ -397,6 +397,8 @@ export interface Session {
   pluginReportedStatus?: boolean;
   lastPluginStatusTime?: number;
   claudeSessionId?: string;
+  /** Last Claude session id seen in this terminal. Unlike claudeSessionId it survives SessionEnd and restarts. */
+  resumeSessionId?: string;
   currentTool?: string;
   lastHookEvent?: string;
   // Permission detection: when the current tool call started, used with
@@ -501,6 +503,8 @@ export interface PersistedNode {
   agentAllowedTools?: string[];
   agentRuntimeManifestPath?: string;
   agentModel?: string;
+  /** Claude's own session id, kept after the agent exits so a relaunch can resume it. */
+  resumeSessionId?: string;
   agentPermissionEvents?: AgentPermissionEvent[];
 }
 
