@@ -255,7 +255,17 @@ export async function planMoveOut(sessionId: string, options: { nodeId?: string;
   const resolved = resolveHarness(session);
   if (resolved.warning) warnings.push(resolved.warning);
   const credential = credentialFor(resolved.harness);
-  if (credential.missing) refusals.push(credential.missing);
+  // A provisioned node starts with no agent login, so the credential is
+  // required there. A devbox the user added is usually signed in already;
+  // without the credential the agent just uses the box's own login.
+  const destinationBox = options.nodeId ? getDevbox(options.nodeId) : null;
+  if (credential.missing) {
+    if (destinationBox && destinationBox.source !== "provisioned") {
+      warnings.push(`No agent credential is set in Naught, so the agent on ${destinationBox.name} uses whatever login that box has. If it is not signed in there, sign in once in the moved session.`);
+    } else {
+      refusals.push(credential.missing);
+    }
+  }
   let destination: MovePlan["destination"];
   if (options.nodeId) {
     const devbox = getDevbox(options.nodeId);

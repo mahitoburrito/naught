@@ -459,6 +459,8 @@ export interface LinearConfig {
   defaultStartingDirectory?: string;
   rememberLastDirectory?: boolean;
   defaultAgentId?: string;
+  /** Devbox a new session runs on unless changed in the dialog; empty = this Mac. */
+  defaultDevboxId?: string;
   /* Remote devboxes (Settings -> Devboxes) */
   devboxes?: DevboxConfig[];
   /* Compute nodes (Settings -> Compute) */

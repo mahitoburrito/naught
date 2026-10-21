@@ -296,6 +296,10 @@ section("move state machine");
   check("plan refuses a missing node", (await move.planMoveOut("s1", { nodeId: "nope", manifest: false })).refusals, ["Destination node not found."]);
   secrets.updateEnvValue("CLAUDE_CODE_OAUTH_TOKEN", "");
   check("plan refuses without a node credential", (await move.planMoveOut("s1", { nodeId: "node-1", manifest: false })).refusals[0].startsWith("Claude needs CLAUDE_CODE_OAUTH_TOKEN"), true);
+  const own = devboxes.createDevbox({ name: "my-box", host: "10.0.0.9", user: "root" });
+  const ownPlan = await move.planMoveOut("s1", { nodeId: own.id, manifest: false });
+  check("a user devbox without a Naught credential warns instead of refusing", [ownPlan.ok, ownPlan.warnings.some((w) => w.includes("uses whatever login that box has"))], [true, true]);
+  devboxes.deleteDevbox(own.id);
   secrets.updateEnvValue("CLAUDE_CODE_OAUTH_TOKEN", "oat-x");
 
   const started = await call("POST", "/api/sessions/s1/move", { nodeId: "node-1", afterTurn: true });

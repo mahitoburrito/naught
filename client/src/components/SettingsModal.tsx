@@ -63,6 +63,7 @@ export function SettingsModal({ open, onClose }: SettingsModalProps) {
   const [defaultStartingDirectory, setDefaultStartingDirectory] = useState("");
   const [rememberLastDirectory, setRememberLastDirectory] = useState(true);
   const [defaultAgentId, setDefaultAgentId] = useState("");
+  const [defaultDevboxId, setDefaultDevboxId] = useState("");
   const [defaultInitialPrompt, setDefaultInitialPrompt] = useState("");
   const [agentRules, setAgentRules] = useState("");
   const [isSaving, setIsSaving] = useState(false);
@@ -108,6 +109,7 @@ export function SettingsModal({ open, onClose }: SettingsModalProps) {
           setDefaultStartingDirectory(config.defaultStartingDirectory || "");
           setRememberLastDirectory(config.rememberLastDirectory ?? true);
           setDefaultAgentId(config.defaultAgentId || "");
+          setDefaultDevboxId(config.defaultDevboxId || "");
           setDefaultInitialPrompt(config.initialPrompt || "");
         })
         .catch(console.error);
@@ -162,6 +164,7 @@ export function SettingsModal({ open, onClose }: SettingsModalProps) {
           defaultStartingDirectory,
           rememberLastDirectory,
           defaultAgentId,
+          defaultDevboxId,
           initialPrompt: defaultInitialPrompt,
         }),
       });
@@ -340,6 +343,8 @@ export function SettingsModal({ open, onClose }: SettingsModalProps) {
                       setRememberLastDirectory={setRememberLastDirectory}
                       defaultAgentId={defaultAgentId}
                       setDefaultAgentId={setDefaultAgentId}
+                      defaultDevboxId={defaultDevboxId}
+                      setDefaultDevboxId={setDefaultDevboxId}
                       defaultInitialPrompt={defaultInitialPrompt}
                       setDefaultInitialPrompt={setDefaultInitialPrompt}
                       defaultBaseBranch={defaultBaseBranch}

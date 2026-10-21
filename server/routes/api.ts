@@ -3539,6 +3539,7 @@ apiRoutes.get("/linear/config", (c) => {
     defaultStartingDirectory: config.defaultStartingDirectory || "",
     rememberLastDirectory: config.rememberLastDirectory ?? true,
     defaultAgentId: config.defaultAgentId || "",
+    defaultDevboxId: config.defaultDevboxId || "",
   });
 });
 
@@ -3556,6 +3557,7 @@ apiRoutes.post("/linear/config", async (c) => {
   if (body.defaultStartingDirectory !== undefined) config.defaultStartingDirectory = body.defaultStartingDirectory;
   if (body.rememberLastDirectory !== undefined) config.rememberLastDirectory = body.rememberLastDirectory;
   if (body.defaultAgentId !== undefined) config.defaultAgentId = body.defaultAgentId;
+  if (body.defaultDevboxId !== undefined) config.defaultDevboxId = typeof body.defaultDevboxId === "string" ? body.defaultDevboxId : "";
 
   saveConfig(config);
   return c.json({ success: true });

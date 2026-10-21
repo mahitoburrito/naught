@@ -238,6 +238,9 @@ export function NewSessionModal({
   // provision one first. Only ready provisioned nodes are offered as targets.
   const [devboxes, setDevboxes] = useState<Devbox[]>([]);
   const [devboxId, setDevboxId] = useState("");
+  // The default devbox from Settings, applied once the devbox list has loaded
+  // so a deleted or not-ready box never gets preselected.
+  const [pendingDefaultDevboxId, setPendingDefaultDevboxId] = useState("");
   const [remotePath, setRemotePath] = useState("");
   const [newNodeSpec, setNewNodeSpec] = useState<NodeRequest | null>(null);
   const [nodeFlow, setNodeFlow] = useState<NodeFlow | null>(null);
@@ -247,6 +250,16 @@ export function NewSessionModal({
     (box) => box.source !== "provisioned" || box.provision?.status === "ready",
   );
   const nodeFlowBusy = !!nodeFlow && nodeFlow.phase !== "error";
+
+  useEffect(() => {
+    if (!pendingDefaultDevboxId || devboxes.length === 0) return;
+    const box = selectableDevboxes.find((item) => item.id === pendingDefaultDevboxId);
+    if (box) {
+      setDevboxId(box.id);
+      setRemotePath(box.defaultPath || "");
+    }
+    setPendingDefaultDevboxId("");
+  }, [pendingDefaultDevboxId, devboxes]);
 
   // Session launch defaults, loaded from Settings -> Sessions
   const [defaultStartingDirectory, setDefaultStartingDirectory] = useState("");
@@ -294,6 +307,7 @@ export function NewSessionModal({
       } else {
         setSelectedAgent(null);
         setDevboxId("");
+        setPendingDefaultDevboxId("");
         setRemotePath("");
         setCwd("");
         setCustomName("");
@@ -355,6 +369,7 @@ export function NewSessionModal({
             const preselected = agents.find((a) => a.id === config.defaultAgentId);
             if (preselected) setSelectedAgent(preselected);
           }
+          if (config.defaultDevboxId) setPendingDefaultDevboxId(config.defaultDevboxId);
           // An explicit prompt handed to the modal outranks the configured one.
           if (config.initialPrompt && !newSessionInitialPrompt) {
             setInitialPrompt(config.initialPrompt);

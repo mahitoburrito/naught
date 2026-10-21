@@ -3,7 +3,7 @@ import { createPortal } from "react-dom";
 import { AnimatePresence, motion } from "framer-motion";
 import { AlertTriangle, FolderTree, GitBranch, KeyRound, Loader2, MessageSquare, Server, X } from "lucide-react";
 import { useStore } from "../../stores/useStore";
-import { formatBytes, formatUsd, type ComputeOffer, type MovePlan, type ProviderId } from "../../types/compute";
+import { formatBytes, formatUsd, type ComputeOffer, type Devbox, type MovePlan, type ProviderId } from "../../types/compute";
 import { useComputeNodes } from "../../hooks/useComputeNodes";
 
 const NEW_NODE = "__new__";
@@ -115,6 +115,25 @@ function MoveSheetDialog({ direction, sessionId, sessionName, devboxName, cwd, o
   const [submitting, setSubmitting] = useState(false);
   const [failure, setFailure] = useState<RequestFailure | null>(null);
   const [serverConflicts, setServerConflicts] = useState<string[] | null>(null);
+
+  // Devboxes the user added themselves (manual or from ~/.ssh/config). They
+  // are listed first, and the Settings default is preselected.
+  const [ownBoxes, setOwnBoxes] = useState<Devbox[]>([]);
+  useEffect(() => {
+    if (!isOut) return;
+    let cancelled = false;
+    Promise.all([
+      fetch("/api/devboxes").then((res) => res.json()).catch(() => ({ devboxes: [] })),
+      fetch("/api/linear/config").then((res) => res.json()).catch(() => ({})),
+    ]).then(([boxes, config]) => {
+      if (cancelled) return;
+      const own: Devbox[] = (boxes.devboxes || []).filter((box: Devbox) => box.source !== "provisioned");
+      setOwnBoxes(own);
+      const preferred = own.find((box) => box.id === config.defaultDevboxId) ?? own[0];
+      if (preferred) setDestination((current) => (current === NEW_NODE ? preferred.id : current));
+    });
+    return () => { cancelled = true; };
+  }, [isOut]);
 
   // If a ready node appears after the sheet opened with none, pick it once.
   useEffect(() => {
@@ -333,6 +352,11 @@ function MoveSheetDialog({ direction, sessionId, sessionName, devboxName, cwd, o
                     onChange={(event) => setDestination(event.target.value)}
                     className={fieldClass}
                   >
+                    {ownBoxes.map((box) => (
+                      <option key={box.id} value={box.id}>
+                        {box.name}{box.host ? ` · ${box.host}` : ""}
+                      </option>
+                    ))}
                     {ready.map((node) => (
                       <option key={node.id} value={node.id}>
                         {node.name} · {node.provision.gpu ? `${node.provision.gpu} × ${node.provision.gpuCount || 1}` : "CPU"} · {formatUsd(node.provision.hourlyUsd)}/hr est.

@@ -1,4 +1,6 @@
+import { useEffect, useState } from "react";
 import { FolderOpen, Sparkles } from "lucide-react";
+import type { Devbox } from "../../types/compute";
 import { SectionHeader, SettingRow, Toggle } from "./primitives";
 import { useStore } from "../../stores/useStore";
 import { canUseNativeDirectoryPicker, pickDirectoryNative } from "../../utils/nativeDirectoryPicker";
@@ -10,6 +12,8 @@ export function SessionsTab({
   setRememberLastDirectory,
   defaultAgentId,
   setDefaultAgentId,
+  defaultDevboxId,
+  setDefaultDevboxId,
   defaultInitialPrompt,
   setDefaultInitialPrompt,
   defaultBaseBranch,
@@ -25,6 +29,8 @@ export function SessionsTab({
   setRememberLastDirectory: (v: boolean) => void;
   defaultAgentId: string;
   setDefaultAgentId: (v: string) => void;
+  defaultDevboxId: string;
+  setDefaultDevboxId: (v: string) => void;
   defaultInitialPrompt: string;
   setDefaultInitialPrompt: (v: string) => void;
   defaultBaseBranch: string;
@@ -35,6 +41,16 @@ export function SessionsTab({
   setAutoCareful: (v: boolean) => void;
 }) {
   const { agents, launchCwd } = useStore();
+  const [devboxes, setDevboxes] = useState<Devbox[]>([]);
+  useEffect(() => {
+    fetch("/api/devboxes")
+      .then((res) => res.json())
+      .then((data) => setDevboxes(data.devboxes || []))
+      .catch(() => setDevboxes([]));
+  }, []);
+  // Cloud nodes come and go; only boxes that outlive a session make sense as a default.
+  const defaultableDevboxes = devboxes.filter((box) => box.source !== "provisioned");
+  const defaultMissing = !!defaultDevboxId && devboxes.length > 0 && !devboxes.some((box) => box.id === defaultDevboxId);
 
   const browseForDefaultDirectory = async () => {
     const picked = await pickDirectoryNative(defaultStartingDirectory || launchCwd);
@@ -77,6 +93,25 @@ export function SessionsTab({
             description="Reopen at the directory you last picked instead of the default above"
           >
             <Toggle checked={rememberLastDirectory} onChange={setRememberLastDirectory} />
+          </SettingRow>
+
+          <SettingRow
+            title="Default run on"
+            description={defaultMissing
+              ? "The saved default devbox no longer exists; new sessions run on this Mac"
+              : "Where new sessions start; you can still change it per session"}
+          >
+            <select
+              value={defaultMissing ? "" : defaultDevboxId}
+              onChange={(e) => setDefaultDevboxId(e.target.value)}
+              aria-label="Default run on"
+              className="w-[180px] px-2.5 py-1.5 rounded-md bg-canvas border border-border text-white text-sm focus:outline-none focus:border-zinc-500 transition-colors"
+            >
+              <option value="">This Mac</option>
+              {defaultableDevboxes.map((box) => (
+                <option key={box.id} value={box.id}>{box.name}</option>
+              ))}
+            </select>
           </SettingRow>
 
           <SettingRow
