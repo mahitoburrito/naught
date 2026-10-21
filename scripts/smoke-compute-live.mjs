@@ -17,7 +17,9 @@ if (process.env.NAUGHT_LIVE_SMOKE !== "1") {
 
 const here = dirname(fileURLToPath(import.meta.url));
 const dist = join(here, "..", "dist", "electron", "server");
-process.env.LAUNCH_CWD = process.env.LAUNCH_CWD || mkdtempSync(join(tmpdir(), "naught-live-"));
+// Never the inherited LAUNCH_CWD: inside a Naught session that is the real
+// app's state folder, and the test nodes would land in the user's Devboxes.
+process.env.LAUNCH_CWD = process.env.NAUGHT_SMOKE_STATE_DIR || mkdtempSync(join(tmpdir(), "naught-live-"));
 process.env.OPENUI_QUIET = "1";
 
 const nodes = await import(join(dist, "services", "compute", "nodes.js"));
