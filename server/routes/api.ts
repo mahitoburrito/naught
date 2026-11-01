@@ -3241,6 +3241,7 @@ apiRoutes.post("/status-update", async (c) => {
   }
 
   if (session) {
+    let recoveryChanged = false;
     // Bind the agent's own session id, and re-bind it when a new agent session
     // starts in the same terminal. Binding once and never clearing lets two
     // OpenUI sessions carry the same id after a `--resume`, and the id-matching
@@ -3249,11 +3250,22 @@ apiRoutes.post("/status-update", async (c) => {
       session.claudeSessionId = claudeSessionId;
     }
     // Remembered across SessionEnd and app restarts so the node can resume it.
-    if (claudeSessionId && isResumableSessionId(claudeSessionId)) {
+    if (isResumableSessionId(claudeSessionId) && session.resumeSessionId !== claudeSessionId) {
       session.resumeSessionId = claudeSessionId;
+      recoveryChanged = true;
+    }
+    if (hookEvent === "SessionStart") {
+      recoveryChanged ||= session.manuallyEnded !== false;
+      session.manuallyEnded = false;
     }
     if (hookEvent === "SessionEnd") {
       session.claudeSessionId = undefined;
+      // Claude distinguishes /exit and Ctrl+D from /clear and signal-driven
+      // shutdown. Losing the process must never count as a user ending it.
+      if (["prompt_input_exit", "logout", "bypass_permissions_disabled"].includes(body.stopReason)) {
+        recoveryChanged ||= session.manuallyEnded !== true;
+        session.manuallyEnded = true;
+      }
     }
 
     if (userPrompt && matchedSessionId) {
@@ -3330,7 +3342,9 @@ apiRoutes.post("/status-update", async (c) => {
       currentTool: nextTool,
     });
 
-    if (status === "pre_tool" && session.agentProfileId) saveState(sessions);
+    // Persist before acknowledging the hook, not at the next 10-second tick:
+    // either the session id or a manual exit can be lost in an immediate crash.
+    if (recoveryChanged || (status === "pre_tool" && session.agentProfileId)) saveState(sessions);
     return c.json({ success: true, ...(hookDecision ? { hookDecision } : {}) });
   }
 
@@ -3546,7 +3560,7 @@ apiRoutes.get("/linear/config", (c) => {
     defaultBaseBranch: config.defaultBaseBranch || "main",
     createWorktree: config.createWorktree ?? false,
     autoCareful: config.autoCareful ?? false,
-    resumeSessionsOnLaunch: config.resumeSessionsOnLaunch ?? false,
+    resumeSessionsOnLaunch: config.resumeSessionsOnLaunch ?? true,
     ticketPromptTemplate: config.ticketPromptTemplate || DEFAULT_TICKET_PROMPT,
     initialPrompt: config.initialPrompt || "",
     defaultStartingDirectory: config.defaultStartingDirectory || "",

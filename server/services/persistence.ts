@@ -496,6 +496,8 @@ function validatePersistedNode(value: unknown): PersistedState["nodes"][number] 
     agentRuntimeManifestPath: boundedString(node.agentRuntimeManifestPath, MAX_CWD_CHARS),
     agentModel: boundedString(node.agentModel, 256),
     resumeSessionId: isResumableSessionId(node.resumeSessionId) ? node.resumeSessionId : undefined,
+    manuallyEnded: typeof node.manuallyEnded === "boolean" ? node.manuallyEnded : undefined,
+    pendingDelete: typeof node.pendingDelete === "boolean" ? node.pendingDelete : undefined,
     agentPermissionEvents: validatePermissionEvents(node.agentPermissionEvents),
     shellLaunch: validateShellLaunch(node.shellLaunch),
     terminalCols: terminalCols === undefined ? undefined : Math.max(2, Math.min(1_000, Math.floor(terminalCols))),
@@ -620,6 +622,8 @@ export function saveState(sessions: Map<string, Session>) {
       agentRuntimeManifestPath: session.agentRuntimeManifestPath,
       agentModel: session.agentModel,
       resumeSessionId: session.resumeSessionId,
+      manuallyEnded: session.manuallyEnded,
+      pendingDelete: session.pendingDelete,
       agentPermissionEvents: session.agentPermissionEvents?.slice(-200),
     });
 

@@ -37,6 +37,11 @@ console.log("agentResume");
   check("an old --resume is replaced", r.buildResumeCommand("claude --resume old-id --model opus", "claude", ID), `claude --model opus --resume ${ID}`);
   check("-r, --continue and -c are dropped", r.buildResumeCommand("claude -r old -c --continue --verbose", "claude", ID), `claude --verbose --resume ${ID}`);
   check("--resume=value form is dropped", r.buildResumeCommand("claude --resume=old", "claude", ID), `claude --resume ${ID}`);
+  check("resume keeps the same conversation even if launch used --fork-session", r.buildResumeCommand("claude --fork-session --model opus", "claude", ID), `claude --model opus --resume ${ID}`);
+  check("compound commands cannot append resume flags to the wrong process", r.buildResumeCommand("claude && echo done", "claude", ID), null);
+  check("shell pipelines are not rewritten", r.buildResumeCommand("claude | cat", "claude", ID), null);
+  check("a shell comment cannot swallow the resume flags", r.buildResumeCommand("claude --model opus # launch", "claude", ID), null);
+  check("quoted shell punctuation is preserved", r.buildResumeCommand('claude --append-system-prompt "Use a && b"', "claude", ID), `claude --append-system-prompt "Use a && b" --resume ${ID}`);
   check("an unsafe id leaves the command alone", r.buildResumeCommand("claude", "claude", "x; y"), null);
   check("quoted text that mentions a flag is left intact", r.buildResumeCommand('claude --append-system-prompt "Never use --continue here"', "claude", ID), `claude --append-system-prompt "Never use --continue here" --resume ${ID}`);
   check("a quoted multi-word --resume value is removed whole", r.buildResumeCommand('claude --resume "old id" --model opus', "claude", ID), `claude --model opus --resume ${ID}`);
@@ -81,12 +86,29 @@ console.log("\npersistence");
   const node = {
     nodeId: "node-1", sessionId: "session-1", agentId: "claude", agentName: "Claude", command: "claude",
     cwd: data, createdAt: new Date().toISOString(), position: { x: 0, y: 0 }, resumeSessionId: ID,
+    manuallyEnded: true, pendingDelete: true,
   };
   p.savePersistedState({ nodes: [node, { ...node, nodeId: "node-2", sessionId: "session-2", resumeSessionId: "bad id; rm" }] });
   const loaded = p.loadState().nodes;
   check("resume id survives a save and load", loaded.find((n) => n.sessionId === "session-1")?.resumeSessionId, ID);
+  check("an explicit end survives a save and load", loaded.find((n) => n.sessionId === "session-1")?.manuallyEnded, true);
+  check("a pending deletion survives a save and load", loaded.find((n) => n.sessionId === "session-1")?.pendingDelete, true);
   check("an unsafe resume id is dropped on load", loaded.find((n) => n.sessionId === "session-2")?.resumeSessionId, undefined);
   rmSync(data, { recursive: true, force: true });
+}
+
+console.log("\nstartup setting");
+{
+  const root = mkdtempSync(join(tmpdir(), "openui-resume-config-"));
+  process.env.LAUNCH_CWD = root;
+  const config = await import(join(dist, "linear.js"));
+  check("recovery is enabled for a new installation", config.loadConfig().resumeSessionsOnLaunch, true);
+  mkdirSync(join(root, ".openui-desktop"));
+  writeFileSync(join(root, ".openui-desktop", "config.json"), JSON.stringify({ autoCareful: false }));
+  check("recovery is enabled for an existing installation", config.loadConfig().resumeSessionsOnLaunch, true);
+  config.saveConfig({ resumeSessionsOnLaunch: false });
+  check("an explicit opt-out is respected", config.loadConfig().resumeSessionsOnLaunch, false);
+  rmSync(root, { recursive: true, force: true });
 }
 
 console.log(`\n${passed} passed, ${failed} failed`);

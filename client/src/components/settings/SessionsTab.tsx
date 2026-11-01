@@ -136,7 +136,7 @@ export function SessionsTab({
         <div className="px-4">
           <SettingRow
             title="Resume sessions on launch"
-            description="Relaunch every saved session when OpenUI opens. Claude sessions pick their conversation back up; others start fresh in the same folder."
+            description="Recover sessions you haven't ended when OpenUI opens. Local Claude sessions resume their saved conversation. Sessions you exit or close stay closed."
             last
           >
             <Toggle checked={resumeSessionsOnLaunch} onChange={setResumeSessionsOnLaunch} />

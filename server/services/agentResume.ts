@@ -19,7 +19,7 @@ export function isResumableSessionId(value: unknown): value is string {
 // Flags that pick a conversation; a resume replaces them with its own.
 // --resume and -r take an optional value; --session-id always takes one.
 const FLAGS_WITH_OPTIONAL_VALUE = new Set(["--resume", "-r", "--session-id"]);
-const BARE_FLAGS = new Set(["--continue", "-c"]);
+const BARE_FLAGS = new Set(["--continue", "-c", "--fork-session"]);
 
 interface ShellToken {
   /** The token exactly as written, quotes included, so it can be re-emitted. */
@@ -29,7 +29,7 @@ interface ShellToken {
 }
 
 /** Split a POSIX-ish command line into words, keeping each word's original quoting. Null on unbalanced quotes. */
-function shellTokens(command: string): ShellToken[] | null {
+function shellTokens(command: string, simpleCommandOnly = false): ShellToken[] | null {
   const tokens: ShellToken[] = [];
   let raw = "";
   let value = "";
@@ -44,6 +44,10 @@ function shellTokens(command: string): ShellToken[] | null {
       else value += ch;
       continue;
     }
+    // Appending --resume to a pipeline or command list would target the last
+    // command, not necessarily Claude. Only rewrite a single invocation.
+    if (simpleCommandOnly && /[;&|<>()\r\n]/.test(ch)) return null;
+    if (simpleCommandOnly && ch === "#" && !inToken) return null;
     if (/\s/.test(ch)) {
       if (inToken) tokens.push({ raw, value });
       raw = ""; value = ""; inToken = false;
@@ -74,7 +78,7 @@ export function isClaudeCommand(command: string, agentId: string): boolean {
 /** `claude …` plus `--resume <id>`, or null when this command cannot be resumed by id. */
 export function buildResumeCommand(command: string, agentId: string, sessionId: string): string | null {
   if (!isResumableSessionId(sessionId) || !isClaudeCommand(command, agentId)) return null;
-  const tokens = shellTokens(command.trim());
+  const tokens = shellTokens(command.trim(), true);
   if (!tokens) return null;
   const kept: string[] = [];
   for (let i = 0; i < tokens.length; i++) {

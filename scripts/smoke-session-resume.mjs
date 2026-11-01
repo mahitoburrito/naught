@@ -44,9 +44,9 @@ function scenario(port, { resumeOnLaunch }) {
     node("claude", { agentId: "claude", agentName: "Claude Code", command: "claude --model opus", resumeSessionId: ID }),
     node("shell", { agentId: "shell", agentName: "Shell", command: "" }),
   ] }));
-  if (resumeOnLaunch) {
+  if (resumeOnLaunch !== undefined) {
     mkdirSync(join(root, ".openui-desktop"), { recursive: true });
-    writeFileSync(join(root, ".openui-desktop", "config.json"), JSON.stringify({ resumeSessionsOnLaunch: true }));
+    writeFileSync(join(root, ".openui-desktop", "config.json"), JSON.stringify({ resumeSessionsOnLaunch: resumeOnLaunch }));
   }
   const child = spawn(process.execPath, ["-e", `require(${JSON.stringify(serverEntry)}).startServer()`], {
     env: { ...process.env, PORT: String(port), LAUNCH_CWD: root, OPENUI_DATA_DIR: data, CLAUDE_CONFIG_DIR: claudeConfig, PATH: `${bin}:${process.env.PATH}` },

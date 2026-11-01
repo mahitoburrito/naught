@@ -399,6 +399,8 @@ export interface Session {
   claudeSessionId?: string;
   /** Last Claude session id seen in this terminal. Unlike claudeSessionId it survives SessionEnd and restarts. */
   resumeSessionId?: string;
+  /** An explicit agent exit disables automatic recovery until the user resumes it. */
+  manuallyEnded?: boolean;
   currentTool?: string;
   lastHookEvent?: string;
   // Permission detection: when the current tool call started, used with
@@ -451,7 +453,7 @@ export interface LinearConfig {
   ticketPromptTemplate?: string;
   initialPrompt?: string;
   autoCareful?: boolean;
-  /** Relaunch saved sessions (resuming Claude conversations) when the app opens. */
+  /** Recover unended sessions when the app opens. Enabled unless explicitly disabled. */
   resumeSessionsOnLaunch?: boolean;
   /* Session launch defaults (Settings -> Sessions) */
   defaultStartingDirectory?: string;
@@ -507,6 +509,9 @@ export interface PersistedNode {
   agentModel?: string;
   /** Claude's own session id, kept after the agent exits so a relaunch can resume it. */
   resumeSessionId?: string;
+  manuallyEnded?: boolean;
+  /** A close during the undo grace period must survive an app crash. */
+  pendingDelete?: boolean;
   agentPermissionEvents?: AgentPermissionEvent[];
 }
 

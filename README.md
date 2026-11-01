@@ -116,7 +116,19 @@ npm run dev
 - **Git worktrees** — isolated branches per agent
 - **Categories** — group agents by team or project
 - **Persistent layout** — everything saved across restarts
+- **Session recovery** — automatically resume local Claude conversations after a restart
 - **Claude Code plugin** — precise status via hooks (auto-injected)
+
+### Session recovery
+
+When OpenUI reopens, local Claude sessions resume the same conversation in the
+same node and working folder. Sessions you explicitly exit or close stay closed;
+you can resume an exited session manually to enable recovery again. Recovery is
+on by default and can be disabled in **Settings → Sessions → On launch**.
+
+Recovery requires a saved Claude session ID and its local transcript. Older nodes
+without an ID, or conversations whose transcripts were removed, stay offline.
+SSH/devbox conversations do not yet support resuming their remote history.
 
 ### Session teardown
 
