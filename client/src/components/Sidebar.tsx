@@ -103,7 +103,7 @@ export function Sidebar() {
   }, []);
 
   // Resize state
-  const [sidebarWidth, setSidebarWidth] = useState(512);
+  const [sidebarWidth, setSidebarWidth] = useState(() => Math.max(384, Math.round(window.innerWidth * 0.45)));
   const isResizing = useRef(false);
 
   const handleMouseDown = useCallback((e: React.MouseEvent) => {
