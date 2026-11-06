@@ -31,6 +31,7 @@ import {
   Code2,
   Loader2,
 } from "lucide-react";
+import { resumeSession } from "../utils/resumeSession";
 import { useStore } from "../stores/useStore";
 import { getTerminalTheme } from "../theme/appearance";
 import {
@@ -898,13 +899,13 @@ export function FocusMode() {
               <button
                 onClick={(e) => {
                   e.stopPropagation();
-                  handleNewSession(nodeId);
+                  void resumeSession(session.sessionId, nodeId);
                 }}
                 className="flex h-7 items-center gap-1 rounded-md px-2 text-[9px] text-[oklch(72%_0.12_28)] transition-colors hover:bg-[oklch(20%_0.04_28)]"
-                title="Restart in a new session"
+                title={session.resumable ? "Resume this conversation in place" : "Relaunch this session in place"}
               >
                 <RotateCcw className="h-3 w-3" />
-                Restart
+                {session.resumable ? "Resume" : "Relaunch"}
               </button>
             )}
             {workspace && (
@@ -971,16 +972,31 @@ export function FocusMode() {
         >
           {isDisconnected && (
             <div className="absolute inset-x-4 top-4 z-20 flex items-center justify-between rounded-md border border-[oklch(38%_0.07_28)] bg-[oklch(17%_0.03_28)] px-3 py-2 text-[11px] text-[oklch(78%_0.10_28)]">
-              <span>This terminal is offline. Its scrollback is still available.</span>
-              <button
-                onClick={(event) => {
-                  event.stopPropagation();
-                  handleNewSession(nodeId);
-                }}
-                className="ml-3 rounded px-2 py-1 text-[10px] font-medium hover:bg-[oklch(22%_0.05_28)]"
-              >
-                Start new session
-              </button>
+              <span>
+                {session.resumable
+                  ? "This terminal is offline. Resume picks the conversation back up."
+                  : "This terminal is offline. Its scrollback is still available."}
+              </span>
+              <span className="ml-3 flex items-center gap-1">
+                <button
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    void resumeSession(session.sessionId, nodeId);
+                  }}
+                  className="rounded px-2 py-1 text-[10px] font-medium hover:bg-[oklch(22%_0.05_28)]"
+                >
+                  {session.resumable ? "Resume" : "Relaunch"}
+                </button>
+                <button
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    handleNewSession(nodeId);
+                  }}
+                  className="rounded px-2 py-1 text-[10px] font-medium text-[oklch(65%_0.06_28)] hover:bg-[oklch(22%_0.05_28)]"
+                >
+                  New session
+                </button>
+              </span>
             </div>
           )}
           <Terminal

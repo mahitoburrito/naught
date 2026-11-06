@@ -1,3 +1,4 @@
+import { isClaudeCommand, planRelaunch } from "./agentResume";
 import * as pty from "node-pty";
 import {
   accessSync,
@@ -2206,21 +2207,158 @@ export function deleteSession(sessionId: string) {
   return true;
 }
 
+export interface RestartSessionResult {
+  ok: boolean;
+  status: number;
+  error?: string;
+  /** True when a Claude conversation was resumed rather than started fresh. */
+  resumed?: boolean;
+}
+
+/**
+ * Relaunch a disconnected session in place: same node, directory and launch
+ * command. With resume, a Claude node whose conversation is still on disk runs
+ * `claude --resume <id>`; everything else starts fresh.
+ */
+export function restartSession(sessionId: string, options: { resume?: boolean } = {}): RestartSessionResult {
+  const session = sessions.get(sessionId);
+  if (!session) return { ok: false, status: 404, error: "Session not found" };
+  if (session.pendingDelete) return { ok: false, status: 409, error: "Session is being closed" };
+  const plan = planRelaunch(session, { resume: options.resume === true });
+  if (options.resume && session.resumeSessionId && isClaudeCommand(session.command, session.agentId) && !plan.resumed) {
+    return { ok: false, status: 409, error: "Saved Claude conversation is unavailable or its launch command cannot be resumed. Restore its transcript or start a new session." };
+  }
+  if (session.pty) {
+    // The agent can exit on its own and leave its shell running (Claude's
+    // SessionEnd hook marks the node disconnected). Relaunch in that shell.
+    if (session.status !== "disconnected") return { ok: false, status: 400, error: "Session already running" };
+    // SessionEnd fires before Claude finishes its cleanup. Wait for the shell
+    // prompt, or the dying Claude process can consume the resume command.
+    if (!terminalLifecycleFor(sessionId, session).canAcceptCommand()) {
+      return { ok: false, status: 409, error: "Claude is still exiting. Try Resume again in a moment." };
+    }
+    const ptyProcess = session.pty;
+    const command = injectPluginDir(resolveAgentLaunchCommand(plan.command, session.agentId), session.agentId);
+    if (!command) return { ok: false, status: 400, error: "This session has no agent command to relaunch" };
+    if (!startTrackedCommand(sessionId, session, ptyProcess, command)) {
+      return { ok: false, status: 409, error: "The terminal could not accept the resume command. Try again." };
+    }
+    session.isRestored = false;
+    session.manuallyEnded = false;
+    session.lastHookEvent = undefined;
+    session.currentTool = undefined;
+    session.preToolTime = undefined;
+    applyAgentStatus(session, "running", { source: "authoritative", immediate: true });
+    session.statusChangedAt = Date.now();
+    saveState(sessions);
+    log(`[session] ${plan.resumed ? "Resumed" : "Relaunched"} agent in the live shell of ${sessionId}`);
+    return { ok: true, status: 200, resumed: plan.resumed };
+  }
+
+  const { shell, args: shellArgs } = getSessionShellLaunch(session);
+  const cwd = existsSync(session.cwd) ? session.cwd : homedir();
+
+  let ptyProcess: pty.IPty;
+  try {
+    ptyProcess = pty.spawn(shell, shellArgs, {
+      name: "xterm-256color",
+      cwd,
+      env: getSessionPtyEnvironment(sessionId, session),
+      cols: session.terminalCols || DEFAULT_PTY_COLS,
+      rows: session.terminalRows || DEFAULT_PTY_ROWS,
+    });
+  } catch (e: any) {
+    logError(`[session] Failed to restart PTY (shell=${shell}, cwd=${cwd}): ${e.message}`);
+    return { ok: false, status: 500, error: `Failed to spawn terminal: ${e.message}` };
+  }
+
+  session.pty = ptyProcess;
+  session.isRestored = false;
+  session.manuallyEnded = false;
+  // Existing clients will receive this PTY epoch live. If none are attached,
+  // let the first future renderer reconstruct it from the bounded raw buffer.
+  session.terminalClientConnected = session.clients.size > 0;
+  session.lastOutputTime = Date.now();
+  session.cwd = cwd;
+  session.shellLaunch = { shell, args: [...shellArgs] };
+  resetTerminalLifecycle(sessionId, cwd);
+  session.agentFallbackIndex = 0;
+  session.agentAttemptCommand = undefined;
+  session.agentAttemptBlockId = undefined;
+  session.agentAttemptStartedAt = undefined;
+
+  startAgentStatusTicker(sessionId, session, sessions);
+
+  // Reset plugin status tracking for a fresh process. Everything createSession
+  // initialises has to be reset here too, or the new PTY inherits the old
+  // one's inference state.
+  session.pluginReportedStatus = false;
+  session.lastPluginStatusTime = undefined;
+  session.lastHookEvent = undefined;
+  session.claudeSessionId = undefined;
+  session.currentTool = undefined;
+  session.preToolTime = undefined;
+  session.recentOutputSize = 0;
+  applyAgentStatus(session, "running", { source: "authoritative", immediate: true });
+  session.statusChangedAt = Date.now();
+
+  attachSessionPty(sessionId, session, ptyProcess, "Restarted PTY");
+
+  const finalCommand = injectPluginDir(
+    resolveAgentLaunchCommand(plan.command, session.agentId),
+    session.agentId,
+  );
+  setTimeout(() => {
+    if (session.pty === ptyProcess) installShellIntegration(sessionId, session, ptyProcess, shell);
+  }, 150);
+  setTimeout(() => {
+    if (finalCommand && session.pty === ptyProcess) {
+      startTrackedCommand(sessionId, session, ptyProcess, finalCommand);
+    }
+  }, 450);
+
+  saveState(sessions);
+  log(`[session] ${plan.resumed ? "Resumed" : "Restarted"} ${sessionId}`);
+  return { ok: true, status: 200, resumed: plan.resumed };
+}
+
+/** Recover unended sessions after launch, staggered so agents don't all load at once. */
+export function resumeRestoredSessions(delayMs = 400): void {
+  const eligible = (session: Session) => session.isRestored && !session.pty && !session.manuallyEnded && !session.pendingDelete;
+  const pending = [...sessions.entries()].filter(([, session]) => eligible(session)).map(([id]) => id);
+  pending.forEach((sessionId, index) => {
+    setTimeout(() => {
+      const session = sessions.get(sessionId);
+      // A user may resume, close, or replace a node while it is queued.
+      if (!session || !eligible(session)) return;
+      if (isClaudeCommand(session.command, session.agentId) && !planRelaunch(session, { resume: true }).resumed) {
+        log(`[restore] Leaving ${sessionId} offline: its Claude conversation is unavailable`);
+        return;
+      }
+      const result = restartSession(sessionId, { resume: true });
+      if (!result.ok) logError(`[restore] Could not resume ${sessionId}: ${result.error}`);
+    }, index * delayMs);
+  });
+  if (pending.length > 0) log(`[restore] Resuming ${pending.length} saved session(s)`);
+}
+
 export async function restoreSessions() {
   const state = loadState();
+  // Closing is durable immediately, including during the UI's undo window.
+  const restorableNodes = state.nodes.filter(node => !node.pendingDelete);
 
   log(`[restore] Found ${state.nodes.length} saved sessions`);
 
   // Carry the remembered spawn geometry across the restart, so the first session of
   // a launch spawns at the size the user reads terminals at rather than at 80x24.
-  for (const node of state.nodes) {
+  for (const node of restorableNodes) {
     notePreferredTerminalSize(
       node.terminalCols || DEFAULT_PTY_COLS,
       node.terminalRows || DEFAULT_PTY_ROWS,
     );
   }
 
-  for (const node of state.nodes) {
+  for (const node of restorableNodes) {
     const buffer = loadBuffer(node.sessionId);
     const gitBranch = await getGitBranch(node.cwd);
 
@@ -2263,6 +2401,8 @@ export async function restoreSessions() {
       agentAllowedTools: node.agentAllowedTools,
       agentRuntimeManifestPath: node.agentRuntimeManifestPath,
       agentModel: node.agentModel,
+      resumeSessionId: node.resumeSessionId,
+      manuallyEnded: node.manuallyEnded,
       agentPermissionEvents: node.agentPermissionEvents,
     };
 

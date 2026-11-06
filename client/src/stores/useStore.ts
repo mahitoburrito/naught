@@ -94,6 +94,8 @@ export interface AgentSession {
   customColor?: string;
   notes?: string;
   isRestored?: boolean;
+  /** A disconnected Claude node whose conversation can be resumed. */
+  resumable?: boolean;
   // Linear ticket info
   ticketId?: string;
   ticketTitle?: string;

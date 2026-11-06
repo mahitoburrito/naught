@@ -87,6 +87,10 @@ jobs:
       - name: Run feature regression suite
         run: npm run test:features
 
+      - name: Verify session resume and crash recovery
+        if: runner.os != 'Windows'
+        run: npm run test:resume
+
       - name: Validate POSIX shell adapters
         if: runner.os == 'Linux'
         shell: bash

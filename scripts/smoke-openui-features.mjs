@@ -8040,6 +8040,13 @@ async function runCrashRestorationIntegrationTests() {
 
   try {
     server = await startIsolatedServer(home, port);
+    // This scenario verifies offline scrollback restoration with recovery disabled.
+    // Automatic Claude recovery is exercised by smoke-session-recovery.mjs.
+    await apiAt(server.baseUrl, "/api/linear/config", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ resumeSessionsOnLaunch: false }),
+    });
     const created = await apiAt(server.baseUrl, "/api/sessions", {
       method: "POST",
       headers: { "Content-Type": "application/json" },

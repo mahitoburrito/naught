@@ -121,6 +121,7 @@ function restoreServerSessionToCanvas(sessionData: any) {
     customColor: sessionData.customColor,
     notes: sessionData.notes,
     isRestored: sessionData.isRestored,
+    resumable: sessionData.resumable,
     ticketId: sessionData.ticketId,
     ticketTitle: sessionData.ticketTitle,
     worktreePaths: sessionData.worktreePaths,
@@ -323,6 +324,9 @@ function AppContent() {
                 if (existing.isRestored !== sessionData.isRestored) {
                   sessionUpdates.isRestored = sessionData.isRestored;
                 }
+                if (existing.resumable !== sessionData.resumable) {
+                  sessionUpdates.resumable = sessionData.resumable;
+                }
                 if (existing.terminalCols !== sessionData.terminalCols) {
                   sessionUpdates.terminalCols = sessionData.terminalCols;
                 }
@@ -469,6 +473,7 @@ function AppContent() {
             customColor: session.customColor,
             notes: session.notes,
             isRestored: session.isRestored,
+            resumable: session.resumable,
             ticketId: session.ticketId,
             ticketTitle: session.ticketTitle,
             worktreePaths: session.worktreePaths,

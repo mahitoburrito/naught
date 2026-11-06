@@ -26,7 +26,7 @@ if command -v jq &> /dev/null; then
   TOOL_NAME=$(echo "$INPUT" | jq -r '.tool_name // empty' 2>/dev/null || echo "")
   TOOL_INPUT=$(echo "$INPUT" | jq -c '.tool_input // empty' 2>/dev/null || echo "")
 
-  # Stop-related fields (Stop/SubagentStop)
+  # Stop-related fields, including the reason for SessionEnd
   STOP_REASON=$(echo "$INPUT" | jq -r '.reason // empty' 2>/dev/null || echo "")
   STOP_RESULT=$(echo "$INPUT" | jq -r '.stop_hook_result // empty' 2>/dev/null || echo "")
 
@@ -55,7 +55,7 @@ else
   HOOK_EVENT=$(echo "$INPUT" | grep -o '"hook_event_name"[[:space:]]*:[[:space:]]*"[^"]*"' | sed 's/.*: *"//' | sed 's/"$//' || echo "")
   TOOL_NAME=$(echo "$INPUT" | grep -o '"tool_name"[[:space:]]*:[[:space:]]*"[^"]*"' | sed 's/.*: *"//' | sed 's/"$//' || echo "")
   NOTIFICATION_TYPE=$(echo "$INPUT" | grep -o '"notification"[[:space:]]*:[[:space:]]*"[^"]*"' | sed 's/.*: *"//' | sed 's/"$//' || echo "")
-  STOP_REASON=""
+  STOP_REASON=$(echo "$INPUT" | grep -o '"reason"[[:space:]]*:[[:space:]]*"[^"]*"' | sed 's/.*: *"//' | sed 's/"$//' || echo "")
   TOOL_INPUT=""
   TRANSCRIPT_PATH=""
   USER_PROMPT=""
@@ -91,7 +91,7 @@ if [ -n "$STATUS" ]; then
     PAYLOAD="${PAYLOAD},\"toolInput\":${TOOL_INPUT}"
   fi
 
-  # Add stop reason if present (Stop/SubagentStop)
+  # Add stop reason if present (also distinguishes explicit exits in SessionEnd)
   if [ -n "$STOP_REASON" ]; then
     PAYLOAD="${PAYLOAD},\"stopReason\":\"${STOP_REASON}\""
   fi

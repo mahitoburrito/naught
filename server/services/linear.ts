@@ -70,7 +70,7 @@ function saveEnvFile(apiKey: string): void {
 
 export function loadConfig(): LinearConfig {
   const envVars = loadEnvFile();
-  const config: LinearConfig = {};
+  const config: LinearConfig = { resumeSessionsOnLaunch: true };
 
   config.apiKey = envVars.LINEAR_API_KEY || process.env.LINEAR_API_KEY;
 
@@ -82,6 +82,7 @@ export function loadConfig(): LinearConfig {
       config.createWorktree = fileConfig.createWorktree;
       config.ticketPromptTemplate = fileConfig.ticketPromptTemplate;
       config.autoCareful = fileConfig.autoCareful;
+      config.resumeSessionsOnLaunch = fileConfig.resumeSessionsOnLaunch !== false;
       config.initialPrompt = fileConfig.initialPrompt;
       config.defaultStartingDirectory = fileConfig.defaultStartingDirectory;
       config.rememberLastDirectory = fileConfig.rememberLastDirectory;
@@ -111,6 +112,7 @@ export function saveConfig(config: LinearConfig): void {
       createWorktree: config.createWorktree,
       ticketPromptTemplate: config.ticketPromptTemplate,
       autoCareful: config.autoCareful,
+      resumeSessionsOnLaunch: config.resumeSessionsOnLaunch,
       initialPrompt: config.initialPrompt,
       defaultStartingDirectory: config.defaultStartingDirectory,
       rememberLastDirectory: config.rememberLastDirectory,
