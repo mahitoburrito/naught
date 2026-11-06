@@ -42,6 +42,7 @@
     "build:electron": "tsc -p tsconfig.electron.json",
     "build": "npm run build:client && npm run build:electron",
     "test:features": "npm run build && node scripts/smoke-openui-features.mjs",
+    "test:editor-memory": "node scripts/smoke-editor-memory.mjs",
     "test:status": "npm run build:electron && node scripts/test-agent-status.mjs",
     "test:coordinator": "npm run build:electron && node scripts/test-coordinator.mjs",
     "start": "node bin/openui-desktop.js",

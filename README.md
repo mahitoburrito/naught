@@ -155,6 +155,16 @@ In dev mode:
 
 Use `PORT=7968 npm run dev` to run on a different port (useful if the browser version is already running).
 
+Run the editor memory regression with a [gstack browse](https://github.com/garrytan/gstack) executable:
+
+```bash
+BROWSE_BIN=/path/to/browse npm run test:editor-memory
+```
+
+It uses an isolated React/Monaco workspace and fixture files to check model cleanup,
+unsaved edits, undo, reload, and session switching. Its model counts measure retained
+editor resources, not total Electron memory or the memory used by agent processes.
+
 ## Build & Package
 
 ```bash
