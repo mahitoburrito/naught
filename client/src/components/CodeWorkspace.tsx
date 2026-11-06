@@ -236,6 +236,36 @@ export function CodeWorkspace({ sessionId, sessionName, cwd, onDirtyChange }: Co
   const [cursor, setCursor] = useState({ lineNumber: 1, column: 1 });
   const saveRef = useRef<(path?: string | null) => void>(() => {});
   const searchRef = useRef<HTMLInputElement>(null);
+  const modelsRef = useRef(new Set<monaco.editor.ITextModel>());
+  const openModelUris = useMemo(() => new Set(tabs.map(path =>
+    monaco.Uri.parse(`file://${root.replace(/\\/g, "/")}/${path}`).toString()
+  )), [root, tabs]);
+  const openModelUrisRef = useRef(openModelUris);
+  openModelUrisRef.current = openModelUris;
+
+  // Monaco's model registry outlives the editor. Keep models (and undo history)
+  // while their tabs are open, then release only the models this workspace used.
+  useEffect(() => {
+    for (const model of modelsRef.current) {
+      if (!openModelUris.has(model.uri.toString())) model.dispose();
+    }
+  }, [openModelUris]);
+
+  useEffect(() => {
+    const models = modelsRef.current;
+    // Creation precedes the React wrapper's onMount callback. Register here so
+    // closing during initialization cannot strand an untracked model.
+    const creationListener = monaco.editor.onDidCreateModel(model => {
+      if (!openModelUrisRef.current.has(model.uri.toString())) return;
+      models.add(model);
+      model.onWillDispose(() => models.delete(model));
+    });
+    return () => {
+      creationListener.dispose();
+      for (const model of models) model.dispose();
+      models.clear();
+    };
+  }, [sessionId, cwd]);
 
   const dirtyPaths = useMemo(() => new Set(
     Object.values(documents)
@@ -380,6 +410,12 @@ export function CodeWorkspace({ sessionId, sessionName, cwd, onDirtyChange }: Co
     const file = files.find((item) => item.path === path);
     if (!file) return;
     if (dirtyPaths.has(path) && !window.confirm(`Discard unsaved changes in ${path} and reload it?`)) return;
+    // A confirmed reload must replace both the document and its retained model,
+    // including discarded undo history, with the freshly read disk contents.
+    const uri = monaco.Uri.parse(`file://${root.replace(/\\/g, "/")}/${path}`).toString();
+    for (const model of modelsRef.current) {
+      if (model.uri.toString() === uri) model.dispose();
+    }
     setDocuments((current) => {
       const next = { ...current };
       delete next[path];
@@ -387,7 +423,7 @@ export function CodeWorkspace({ sessionId, sessionName, cwd, onDirtyChange }: Co
     });
     setError(null);
     await openFile(file, true);
-  }, [dirtyPaths, files, openFile]);
+  }, [dirtyPaths, files, openFile, root]);
 
   useEffect(() => {
     const handleShortcut = (event: KeyboardEvent) => {
@@ -520,6 +556,7 @@ export function CodeWorkspace({ sessionId, sessionName, cwd, onDirtyChange }: Co
                 }))}
                 loading={<div className="flex h-full items-center justify-center text-[10px] text-zinc-600">Starting editor…</div>}
                 saveViewState
+                keepCurrentModel
                 options={{
                   ariaLabel: `Editable code editor for ${activePath}`,
                   automaticLayout: true,
