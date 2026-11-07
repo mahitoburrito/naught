@@ -595,6 +595,8 @@ async function runExternalNavigationUnitTests() {
   const loaded = await import(new URL("../dist/electron/electron/externalNavigation.js", import.meta.url));
   const {
     MAX_WEB_NAVIGATION_URL_CHARS,
+    chromeUserAgentFor,
+    decideWindowOpen,
     normalizeWebNavigationInput,
     safeWebNavigationUrl,
   } = loaded;
@@ -649,6 +651,46 @@ async function runExternalNavigationUnitTests() {
     "oversized navigation input was accepted",
   );
 
+  await assert(
+    chromeUserAgentFor("darwin", "128.0.6613.186") ===
+      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.6613.186 Safari/537.36",
+    "constructed Chrome UA (darwin) did not match Chrome's frozen platform token",
+  );
+  for (const [platform, marker] of [
+    ["win32", "Windows NT 10.0; Win64; x64"],
+    ["linux", "X11; Linux x86_64"],
+  ]) {
+    const ua = chromeUserAgentFor(platform, "128.0.0.0");
+    await assert(
+      ua.includes(marker) && ua.includes("Chrome/128.0.0.0") && !/electron|openui/iu.test(ua),
+      `constructed Chrome UA (${platform}) leaked an app token or lost its platform`,
+    );
+  }
+
+  await assert(
+    decideWindowOpen("about:blank", "new-window").action === "popup" &&
+      decideWindowOpen("", "new-window").action === "popup" &&
+      decideWindowOpen("https://accounts.google.com/o/oauth2/v2/auth?client_id=x", "new-window").action === "popup",
+    "OAuth popup was not allowed a real window (window.opener handshake would be severed)",
+  );
+  const folded = decideWindowOpen("https://example.com/docs", "foreground-tab");
+  await assert(
+    folded.action === "navigate" && folded.url === "https://example.com/docs",
+    "plain target=_blank link no longer folds into the pane",
+  );
+  for (const [openUrl, disposition] of [
+    ["file:///etc/passwd", "new-window"],
+    ["javascript:alert(1)", "new-window"],
+    ["https://user:pass@example.com/", "new-window"],
+    ["about:blank", "foreground-tab"],
+    [null, "foreground-tab"],
+  ]) {
+    await assert(
+      decideWindowOpen(openUrl, disposition).action === "deny",
+      `unsafe window.open was allowed: ${JSON.stringify([openUrl, disposition])}`,
+    );
+  }
+
   const [mainBoundary, browserBoundary] = await Promise.all([
     readFile(join(ROOT, "dist/electron/electron/main.js"), "utf8"),
     readFile(join(ROOT, "dist/electron/electron/browserView.js"), "utf8"),
@@ -664,6 +706,12 @@ async function runExternalNavigationUnitTests() {
       browserBoundary.includes('on("will-redirect", preventUnsafeNavigation)') &&
       !browserBoundary.includes("shell.openExternal(url)"),
     "embedded-browser navigation or redirect escaped the centralized URL boundary",
+  );
+  await assert(
+    browserBoundary.includes("attachNavigationGuards(child.webContents)") &&
+      browserBoundary.split("persist:openui-browser").length >= 2 &&
+      browserBoundary.includes("setPermissionRequestHandler"),
+    "browser popups escaped the URL boundary, left the persistent partition, or inherited allow-all permissions",
   );
 }
 
