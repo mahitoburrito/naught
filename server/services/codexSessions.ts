@@ -25,17 +25,19 @@ export function defaultCodexHome(env: NodeJS.ProcessEnv = process.env): string {
 function rolloutFiles(codexHome: string, sinceMs = 0): string[] {
   const root = join(codexHome, "sessions");
   const out: string[] = [];
-  // Day directories older than `since` cannot hold a rollout written after it
-  // (a day of slack covers time zones), so skip them without listing.
-  const cutoff = sinceMs > 0 ? new Date(sinceMs - 86_400_000) : null;
   const list = (dir: string) => { try { return readdirSync(dir); } catch { return []; } };
+  // Every day directory is listed: a rollout stays in the directory of the day
+  // its thread started and keeps growing there, through every resume.
   for (const year of list(root)) {
-    if (cutoff && Number(year) < cutoff.getFullYear()) continue;
     for (const month of list(join(root, year))) {
       for (const day of list(join(root, year, month))) {
-        if (cutoff && new Date(Number(year), Number(month) - 1, Number(day) + 1) < cutoff) continue;
         for (const name of list(join(root, year, month, day))) {
-          if (name.startsWith("rollout-") && name.endsWith(".jsonl")) out.push(join(root, year, month, day, name));
+          if (!name.startsWith("rollout-") || !name.endsWith(".jsonl")) continue;
+          const path = join(root, year, month, day, name);
+          if (sinceMs > 0) {
+            try { if (statSync(path).mtimeMs < sinceMs) continue; } catch { continue; }
+          }
+          out.push(path);
         }
       }
     }

@@ -122,6 +122,15 @@ console.log("\ncodexSessions");
   check("a thread claimed by another node is skipped", c.findCodexThreadForPrompt({ prompt: "now make it faster please", cwd: "/Users/me", submittedAt: now, codexHome: home, exclude: new Set([A]) }), C);
   check("a short prompt identifies nothing", c.findCodexThreadForPrompt({ prompt: "ok", cwd: "/Users/me", submittedAt: now, codexHome: home }), null);
   check("an old message deep in a thread is not a fresh submission", c.findCodexThreadForPrompt({ prompt: "Feed in an anime + the manga", cwd: "/Users/me", submittedAt: now, codexHome: home }), null);
+  {
+    // A thread started days ago keeps its rollout in that day's directory.
+    const oldDay = join(home, "sessions", "2025", "01", "02");
+    mkdirSync(oldDay, { recursive: true });
+    const D = "01a1dddd-0000-7000-8000-000000000004";
+    writeFileSync(join(oldDay, `rollout-2025-01-02T10-00-00-${D}.jsonl`), [meta(D, "/Users/me"), user("an old thread resumed today")].join("\n") + "\n");
+    check("a prompt in a thread started long ago is found", c.findCodexThreadForPrompt({ prompt: "an old thread resumed today", cwd: "/Users/me", submittedAt: Date.now(), codexHome: home }), D);
+    rmSync(oldDay, { recursive: true, force: true });
+  }
   check("a rollout untouched since the prompt is not it", c.findCodexThreadForPrompt({ prompt: "now make it faster please", cwd: "/Users/me", submittedAt: now + 60_000, codexHome: home }), null);
 
   const infer = (prompts, extra = {}) => c.inferConversationId({ kind: "codex", cwd: "/Users/me", prompts, createdAt: now - 3_600_000, codexHome: home, ...extra });
