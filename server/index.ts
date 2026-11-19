@@ -11,6 +11,8 @@ import { coordinatorRoutes } from "./routes/coordinator";
 import { devboxRoutes } from "./routes/devboxes";
 import {
   resumeRestoredSessions,
+  noteSubmittedPrompt,
+  markServerShuttingDown,
   sessions,
   restoreSessions,
   scheduleSessionTitleGeneration,
@@ -167,7 +169,7 @@ export async function startServer(): Promise<number> {
   }
   log(`[server] Running on http://localhost:${actualPort}`);
   // Agents need the real port for their status hooks, so relaunch only once listening.
-  if (loadConfig().resumeSessionsOnLaunch) resumeRestoredSessions();
+  if (loadConfig().resumeSessionsOnLaunch) void resumeRestoredSessions();
   log(`[server] Launch directory: ${process.env.LAUNCH_CWD || process.cwd()}`);
 
   return new Promise((resolve) => {
@@ -289,6 +291,7 @@ export async function startServer(): Promise<number> {
                   const query = session.firstInputBuffer.trim();
                   if (query.length > 0) {
                     scheduleSessionTitleGeneration(sessionId, query);
+                    noteSubmittedPrompt(sessionId, query);
                   }
                   session.firstInputBuffer = "";
                 } else {
@@ -362,6 +365,7 @@ export async function startServer(): Promise<number> {
 
     // Cleanup on exit
     process.on("SIGINT", () => {
+      markServerShuttingDown();
       log("[server] Saving state before exit...");
       emergencySave();
       // Synchronous, and batched into a single pass: Electron tears the process
@@ -390,6 +394,7 @@ export async function startServer(): Promise<number> {
 
     // Crash-resilient: save on SIGTERM, uncaughtException, unhandledRejection
     process.on("SIGTERM", () => {
+      markServerShuttingDown();
       log("[server] SIGTERM received, saving state...");
       emergencySave();
       process.exit(0);
