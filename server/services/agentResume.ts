@@ -1,12 +1,14 @@
 import { existsSync, readdirSync } from "fs";
+import { codexRolloutExists } from "./codexSessions";
 import { homedir } from "os";
 import { join } from "path";
 
 /**
  * Relaunching a saved session. Claude Code reports its own session id through
- * hooks; with that id saved on the node, a relaunch can run
- * `claude --resume <id>` and pick the conversation back up. Codex reports no
- * id, and a devbox command wraps the agent in ssh, so those relaunch fresh.
+ * hooks; Codex reports none, so codexSessions.ts finds it from the rollout the
+ * submitted prompt landed in. With that id saved on the node, a relaunch runs
+ * `claude --resume <id>` or `codex resume <id>` and picks the conversation
+ * back up. A devbox command wraps the agent in ssh, so it relaunches fresh.
  */
 
 // Claude ids are UUIDs. Anything else is refused before it reaches a shell.
@@ -75,9 +77,60 @@ export function isClaudeCommand(command: string, agentId: string): boolean {
   return first === "claude" || first.endsWith("/claude");
 }
 
-/** `claude …` plus `--resume <id>`, or null when this command cannot be resumed by id. */
+/** True when the launch command runs Codex directly (not through ssh or a wrapper). */
+export function isCodexCommand(command: string, agentId: string): boolean {
+  if (agentId !== "codex" && !agentId.startsWith("profile:")) return false;
+  const first = shellTokens(command)?.[0]?.value || "";
+  return first === "codex" || first.endsWith("/codex");
+}
+
+export type ResumableAgent = "claude" | "codex";
+
+/** Which agent this launch command can resume by id, or null for anything else. */
+export function resumableAgentKind(command: string, agentId: string): ResumableAgent | null {
+  if (isClaudeCommand(command, agentId)) return "claude";
+  if (isCodexCommand(command, agentId)) return "codex";
+  return null;
+}
+
+// Codex options that take a value. Anything else that is not a flag is a
+// positional (a prompt or a subcommand), and `resume <id>` cannot follow it.
+const CODEX_FLAGS_WITH_VALUE = new Set([
+  "-m", "--model", "-c", "--config", "-p", "--profile", "-C", "--cd", "-s", "--sandbox",
+  "-a", "--ask-for-approval", "-i", "--image", "--add-dir", "--enable", "--disable",
+  "--local-provider", "--remote", "--remote-auth-token-env",
+]);
+
+/** `codex …` plus `resume <id>`, keeping the launch flags (`--yolo`, `-m`, `--no-daemon`). */
+function buildCodexResumeCommand(command: string, sessionId: string): string | null {
+  const tokens = shellTokens(command.trim(), true);
+  if (!tokens || tokens.length === 0) return null;
+  const kept = [tokens[0].raw];
+  for (let i = 1; i < tokens.length; i++) {
+    const { raw, value } = tokens[i];
+    // A previous `resume <id>` or `resume --last` is replaced by this one.
+    if (value === "resume") {
+      for (let j = i + 1; j < tokens.length; j++) {
+        if (tokens[j].value.startsWith("-")) { if (tokens[j].value !== "--last") kept.push(tokens[j].raw); continue; }
+        if (j !== i + 1) return null;
+      }
+      break;
+    }
+    if (value.startsWith("-")) {
+      kept.push(raw);
+      if (CODEX_FLAGS_WITH_VALUE.has(value) && tokens[i + 1]) kept.push(tokens[++i].raw);
+      continue;
+    }
+    return null;
+  }
+  return [...kept, "resume", sessionId].join(" ");
+}
+
+/** The launch command plus a resume of `sessionId`, or null when this command cannot be resumed by id. */
 export function buildResumeCommand(command: string, agentId: string, sessionId: string): string | null {
-  if (!isResumableSessionId(sessionId) || !isClaudeCommand(command, agentId)) return null;
+  if (!isResumableSessionId(sessionId)) return null;
+  if (isCodexCommand(command, agentId)) return buildCodexResumeCommand(command, sessionId);
+  if (!isClaudeCommand(command, agentId)) return null;
   const tokens = shellTokens(command.trim(), true);
   if (!tokens) return null;
   const kept: string[] = [];
@@ -117,19 +170,32 @@ export interface RelaunchPlan {
   resumed: boolean;
 }
 
+/** True when the agent still has this conversation on disk. */
+export function conversationExists(
+  kind: ResumableAgent,
+  sessionId: string,
+  options: { claudeConfigDir?: string; codexHome?: string } = {},
+): boolean {
+  return kind === "codex"
+    ? codexRolloutExists(sessionId, options.codexHome)
+    : claudeTranscriptExists(sessionId, options.claudeConfigDir);
+}
+
 /**
  * What to run when a saved session comes back. A resume only happens when the
- * transcript still exists; otherwise the agent starts fresh rather than
- * failing on a conversation Claude no longer has.
+ * conversation still exists; otherwise the agent starts fresh rather than
+ * failing on a conversation the agent no longer has.
  */
 export function planRelaunch(
   session: { agentId: string; command: string; resumeSessionId?: string },
-  options: { resume: boolean; claudeConfigDir?: string },
+  options: { resume: boolean; claudeConfigDir?: string; codexHome?: string },
 ): RelaunchPlan {
   const fresh = { command: session.command, resumed: false };
   if (!options.resume || !session.resumeSessionId) return fresh;
+  const kind = resumableAgentKind(session.command, session.agentId);
+  if (!kind) return fresh;
   const command = buildResumeCommand(session.command, session.agentId, session.resumeSessionId);
   if (!command) return fresh;
-  if (!claudeTranscriptExists(session.resumeSessionId, options.claudeConfigDir)) return fresh;
+  if (!conversationExists(kind, session.resumeSessionId, options)) return fresh;
   return { command, resumed: true };
 }

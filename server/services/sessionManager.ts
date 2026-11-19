@@ -1,4 +1,5 @@
-import { isClaudeCommand, planRelaunch } from "./agentResume";
+import { isResumableSessionId, planRelaunch, resumableAgentKind } from "./agentResume";
+import { findCodexThreadForPrompt, inferConversationId, isIdentifyingPrompt, normalizePrompt, parseCodexExitHint, type StoredConversation } from "./codexSessions";
 import * as pty from "node-pty";
 import {
   accessSync,
@@ -1127,6 +1128,7 @@ export function attachSessionPty(
       );
 
       noteAgentOutputActivity(session);
+      noteCodexExitHint(sessionId, session, data);
 
       for (const client of session.clients) sendTerminalMessage(client, { type: "output", data });
     }
@@ -2198,6 +2200,7 @@ export function deleteSession(sessionId: string) {
   if (stateTrackerPty) stateTrackerPty.kill();
 
   sessions.delete(sessionId);
+  codexOutputTails.delete(sessionId);
   terminalLifecycles.delete(sessionId);
   terminalFind.cancelSession(sessionId);
   disposeTerminalPtyWriter(sessionId);
@@ -2225,7 +2228,7 @@ export function restartSession(sessionId: string, options: { resume?: boolean } 
   if (!session) return { ok: false, status: 404, error: "Session not found" };
   if (session.pendingDelete) return { ok: false, status: 409, error: "Session is being closed" };
   const plan = planRelaunch(session, { resume: options.resume === true });
-  if (options.resume && session.resumeSessionId && isClaudeCommand(session.command, session.agentId) && !plan.resumed) {
+  if (options.resume && session.resumeSessionId && resumableAgentKind(session.command, session.agentId) === "claude" && !plan.resumed) {
     return { ok: false, status: 409, error: "Saved Claude conversation is unavailable or its launch command cannot be resumed. Restore its transcript or start a new session." };
   }
   if (session.pty) {
@@ -2322,24 +2325,134 @@ export function restartSession(sessionId: string, options: { resume?: boolean } 
   return { ok: true, status: 200, resumed: plan.resumed };
 }
 
+/**
+ * Nodes saved before OpenUI kept conversation ids (every Codex node, and Claude
+ * nodes from older builds) get one recovered from the prompts they remembered.
+ * Only an unambiguous match is kept; see inferConversationId.
+ */
+async function recoverMissingConversationIds(ids: string[]): Promise<void> {
+  const cache = new Map<string, StoredConversation | null>();
+  const claimed = new Set([...sessions.values()].map((s) => s.resumeSessionId).filter((id): id is string => Boolean(id)));
+  let changed = false;
+  for (const sessionId of ids) {
+    const session = sessions.get(sessionId);
+    if (!session || session.resumeSessionId) continue;
+    const kind = resumableAgentKind(session.command, session.agentId);
+    if (!kind || !session.titlePromptHistory?.length) continue;
+    try {
+      const id = await inferConversationId({
+        kind,
+        cwd: session.cwd,
+        prompts: session.titlePromptHistory,
+        createdAt: Date.parse(session.createdAt) || 0,
+        exclude: claimed,
+        cache,
+      });
+      if (!id || session.resumeSessionId) continue;
+      session.resumeSessionId = id;
+      claimed.add(id);
+      changed = true;
+      log(`[restore] Recovered ${kind} conversation ${id} for ${sessionId} from its prompts`);
+    } catch (e: any) {
+      logError(`[restore] Could not look up the conversation for ${sessionId}: ${e?.message || e}`);
+    }
+  }
+  if (changed) saveState(sessions);
+}
+
 /** Recover unended sessions after launch, staggered so agents don't all load at once. */
-export function resumeRestoredSessions(delayMs = 400): void {
+export async function resumeRestoredSessions(delayMs = 400): Promise<void> {
   const eligible = (session: Session) => session.isRestored && !session.pty && !session.manuallyEnded && !session.pendingDelete;
-  const pending = [...sessions.entries()].filter(([, session]) => eligible(session)).map(([id]) => id);
-  pending.forEach((sessionId, index) => {
-    setTimeout(() => {
-      const session = sessions.get(sessionId);
-      // A user may resume, close, or replace a node while it is queued.
-      if (!session || !eligible(session)) return;
-      if (isClaudeCommand(session.command, session.agentId) && !planRelaunch(session, { resume: true }).resumed) {
-        log(`[restore] Leaving ${sessionId} offline: its Claude conversation is unavailable`);
-        return;
+  const candidates = [...sessions.entries()].filter(([, session]) => eligible(session)).map(([id]) => id);
+  // Nodes that need their conversation looked up wait for it; everything else
+  // starts straight away rather than behind a scan of the agents' history.
+  const needsLookup = (id: string) => {
+    const session = sessions.get(id);
+    return Boolean(session && !session.resumeSessionId && session.titlePromptHistory?.length && resumableAgentKind(session.command, session.agentId));
+  };
+  const lookups = candidates.filter(needsLookup);
+  let scheduled = 0;
+  const schedule = (ids: string[]) => {
+    for (const sessionId of ids) {
+      setTimeout(() => {
+        const session = sessions.get(sessionId);
+        // A user may resume, close, or replace a node while it is queued.
+        if (!session || !eligible(session)) return;
+        if (resumableAgentKind(session.command, session.agentId) === "claude" && !planRelaunch(session, { resume: true }).resumed) {
+          log(`[restore] Leaving ${sessionId} offline: its Claude conversation is unavailable`);
+          return;
+        }
+        const result = restartSession(sessionId, { resume: true });
+        if (!result.ok) logError(`[restore] Could not resume ${sessionId}: ${result.error}`);
+      }, scheduled++ * delayMs);
+    }
+  };
+  if (candidates.length > 0) log(`[restore] Resuming ${candidates.length} saved session(s)`);
+  schedule(candidates.filter((id) => !lookups.includes(id)));
+  if (lookups.length === 0) return;
+  await recoverMissingConversationIds(lookups);
+  scheduled = 0;
+  schedule(lookups);
+}
+
+let serverShuttingDown = false;
+/** Called from the quit handlers: output an agent prints while being killed is not the user ending it. */
+export function markServerShuttingDown(): void {
+  serverShuttingDown = true;
+}
+
+// Codex prints a resume hint on every deliberate exit. A lost process (power
+// off, kill) never gets to print it, so the hint means the user ended it.
+const codexOutputTails = new Map<string, string>();
+
+function noteCodexExitHint(sessionId: string, session: Session, data: string): void {
+  if (resumableAgentKind(session.command, session.agentId) !== "codex") return;
+  // Keep raw output across chunks: the hint can be split anywhere, and
+  // normalizing each chunk alone would drop the spaces at the seams.
+  const tail = ((codexOutputTails.get(sessionId) || "") + data).slice(-600);
+  codexOutputTails.set(sessionId, tail);
+  const threadId = parseCodexExitHint(normalizePrompt(tail));
+  if (!threadId || serverShuttingDown) return;
+  codexOutputTails.set(sessionId, "");
+  if (isResumableSessionId(threadId)) session.resumeSessionId = threadId;
+  session.manuallyEnded = true;
+  saveState(sessions);
+  log(`[session] Codex exited in ${sessionId}; it will stay closed on the next launch`);
+}
+
+const CODEX_LOOKUP_DELAYS_MS = [1_500, 4_000, 9_000, 20_000, 45_000];
+
+/**
+ * A prompt was submitted in a terminal. For a local Codex node, find the
+ * thread it landed in and keep that id, so a relaunch resumes this chat.
+ * Claude needs none of this: its hooks report the id directly.
+ */
+export function noteSubmittedPrompt(sessionId: string, prompt: string): void {
+  const session = sessions.get(sessionId);
+  if (!session || resumableAgentKind(session.command, session.agentId) !== "codex") return;
+  if (!isIdentifyingPrompt(prompt)) return;
+  const submittedAt = Date.now();
+  const attempt = (index: number) => {
+    const current = sessions.get(sessionId);
+    if (!current || !current.pty) return;
+    const exclude = new Set(
+      [...sessions.entries()].filter(([id]) => id !== sessionId).map(([, s]) => s.resumeSessionId).filter((id): id is string => Boolean(id)),
+    );
+    const id = findCodexThreadForPrompt({ prompt, cwd: current.cwd, submittedAt, exclude });
+    if (id) {
+      if (current.resumeSessionId !== id || current.manuallyEnded) {
+        current.resumeSessionId = id;
+        current.manuallyEnded = false;
+        saveState(sessions);
+        log(`[session] ${sessionId} is in Codex thread ${id}`);
       }
-      const result = restartSession(sessionId, { resume: true });
-      if (!result.ok) logError(`[restore] Could not resume ${sessionId}: ${result.error}`);
-    }, index * delayMs);
-  });
-  if (pending.length > 0) log(`[restore] Resuming ${pending.length} saved session(s)`);
+      return;
+    }
+    if (index + 1 < CODEX_LOOKUP_DELAYS_MS.length) {
+      setTimeout(() => attempt(index + 1), CODEX_LOOKUP_DELAYS_MS[index + 1] - CODEX_LOOKUP_DELAYS_MS[index]);
+    }
+  };
+  setTimeout(() => attempt(0), CODEX_LOOKUP_DELAYS_MS[0]);
 }
 
 export async function restoreSessions() {
